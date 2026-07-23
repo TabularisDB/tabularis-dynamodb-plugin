@@ -1,378 +1,268 @@
-# Tabularis — DynamoDB Plugin
-
-A Tabularis driver plugin that lets Tabularis users inspect, query, and manage AWS DynamoDB tables.
-
-This plugin follows the same architecture as the [MongoDB plugin](https://github.com/TabularisDB/tabularis-mongodb-plugin) and [Elasticsearch plugin](https://github.com/TabularisDB/tabularis-elasticsearch-plugin) — a Rust binary that communicates with Tabularis via JSON-RPC 2.0 over stdio.
-
----
-
-## Status
-
-🚧 **Under development** — part of the [Plugin Bounty Board](https://tabularis.dev/plugins/bounties#dynamodb) initiative.
-
----
-
-## Architecture
-
-### Transport
-
-JSON-RPC 2.0 over stdin/stdout (same as MongoDB and Elasticsearch plugins). Each line is a complete JSON-RPC request; the plugin responds line-by-line.
-
-### Crate name
-
-```
-tabularis-dynamodb-plugin
-```
-
-Uses the official [AWS SDK for Rust](https://github.com/awslabs/aws-sdk-rust) (`aws-sdk-dynamodb`) with `tokio` for async I/O, following the same pattern as the Elasticsearch plugin's worker pool architecture.
-
-## Project Layout
-
-```
-src/
-├── main.rs               # stdio loop, JSON-RPC transport, worker pool
-├── rpc.rs                # Method dispatch (initialize, ping, test_connection, etc.)
-├── models.rs             # ConnectionParams, shared request/response types
-├── error.rs              # PluginError, ErrorCode, From impls for AWS SDK errors
-├── dynamodb/             # DynamoDB client wrapper and connection pool
-│   ├── mod.rs
-│   ├── client.rs         # DynamoDB client creation, ping, health check
-│   └── pool.rs           # Optional connection pool (for SDK config caching)
-├── handlers/             # RPC method implementations
-│   ├── mod.rs
-│   ├── models.rs         # Query, ExecuteQueryResponse, ColumnResponse, etc.
-│   ├── metadata.rs       # get_tables, get_columns, get_indexes, get_foreign_keys
-│   ├── query.rs          # execute_query, test_connection, ping
-│   ├── crud.rs           # insert_record, update_record, delete_record
-│   └── ddl.rs            # get_create_table_sql, etc.
-├── utils/
-│   ├── mod.rs
-│   └── extractor.rs      # Parameter extraction helpers (extract_url, extract_table, etc.)
-├── bin/
-│   └── test_plugin.rs    # Local REPL + integration tests
-testdata/                 # DynamoDB Local seed data
-ui/                       # Optional UI extension (connection form customization)
-```
-
-## Implementation Plan
-
-### Phase 1 — Scaffold & Connection (MVP)
-
-**Goal**: Plugin loads in Tabularis, accepts connection config, and `test_connection` succeeds.
-
-1. **Initialize Rust project**
-   - `Cargo.toml` with `aws-sdk-dynamodb`, `tokio`, `serde`, `serde_json`
-   - `rust-toolchain.toml` (stable)
-   - `manifest.json` — plugin descriptor (see below)
-   - `justfile` — development recipes (build, dev-install, repl, lint, test, etc.)
-   - `.github/workflows/release.yml` — CI/CD matrix build (linux-x64, darwin-arm64, win-x64)
-
-2. **Stdio transport** (`src/main.rs`)
-   - Async worker pool reading JSON-RPC lines from stdin (same pattern as Elasticsearch plugin)
-   - Bounded request queue with backpressure
-   - Writer task for stdout responses
-
-3. **RPC dispatch** (`src/rpc.rs`)
-   - `initialize` → `{ success: true }`
-   - `ping` → calls `test_connection`
-   - `test_connection` → creates DynamoDB client, calls `ListTables` with `Limit(1)`
-   - `get_tables` → returns empty array (stub)
-   - `get_columns` → returns empty array (stub)
-   - `get_routines` → `[]`
-   - `get_views` → `[]`
-   - `get_foreign_keys` → `[]`
-   - `get_indexes` → `[]` (DynamoDB indexes are returned as part of table metadata)
-
-4. **Connection models** (`src/models.rs`)
-   - `ConnectionParams` — parses `driver`, `host`, `port`, `database`, `region`, `access_key_id`, `secret_access_key`, `session_token`, `profile`, `endpoint` (for local DynamoDB)
-   - AWS credential resolution chain: explicit params → profile → environment → IMDS
-
-5. **Error handling** (`src/error.rs`)
-   - `PluginError` with JSON-RPC error codes
-   - `From<aws_sdk_dynamodb::Error>` impl
-   - `From<SdkError>` impl
-
-6. **manifest.json**
-   - `id`: `"dynamodb"`
-   - `name`: `"DynamoDB"`
-   - `default_port`: `8000` (DynamoDB Local)
-   - Capabilities: `schemas: true`, `views: false`, `routines: false`, `file_based: false`, `connection_string: true`, `connection_uri: true`, `identifier_quote: "\""`, `readonly: false`
-   - Data types: `STRING`, `NUMBER`, `BINARY`, `BOOLEAN`, `STRING_SET`, `NUMBER_SET`, `BINARY_SET`, `LIST`, `MAP`, `NULL`
-   - UI extensions for connection modal (AWS auth config)
-
-7. **AWS Auth handling**
-   - Support multiple credential sources:
-     - Explicit `access_key_id` + `secret_access_key` + `region` in connection params
-     - AWS profile name (`~/.aws/credentials`)
-     - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`)
-     - IMDS/ECS for Lambda/EC2 deployments
-   - Support `endpoint` override for DynamoDB Local testing
-   - Region selector: `us-east-1`, `us-west-2`, `eu-west-1`, `ap-southeast-1`, etc.
-
----
-
-### Phase 2 — Metadata (Table & Column Browsing)
-
-**Goal**: Tabularis sidebar shows DynamoDB tables with their schemas.
-
-1. **`get_tables`** → `ListTables` → returns `[{ name: "users", schema: null, comment: null }]`
-   - DynamoDB is single-region-single-account; `schema` is always `null` (no multi-schema), but we can treat the account/region as a pseudo-schema
-   - Paginate through `ListTables` if > 100 tables
-
-2. **`get_databases`** → returns `[{ name: "default" }]` — DynamoDB is schema-less in the relational sense
-   - Optionally surface AWS region as a "database" concept
-
-3. **`get_schemas`** → returns `[]` (DynamoDB has no schema concept)
-
-4. **`get_columns`** → `DescribeTable` → maps attribute definitions to column metadata:
-   ```
-   { name: "id", data_type: "STRING", is_pk: true, is_nullable: false, is_auto_increment: false }
-   { name: "email", data_type: "STRING", is_pk: false, is_nullable: false, is_auto_increment: false }
-   ```
-   - Include key schema info (HASH key, RANGE key)
-   - Parse `AttributeDefinitions` from `DescribeTable` response
-   - Handle complex types: `LIST`, `MAP` → shown as `JSON`
-
-5. **`get_indexes`** → `DescribeTable` → returns global secondary indexes (GSI) and local secondary indexes (LSI):
-   ```
-   { name: "email-index", columns: ["email"], is_unique: false, is_primary: false }
-   ```
-
-6. **`get_foreign_keys`** → returns `[]` (DynamoDB has no FK constraints)
-
----
-
-### Phase 3 — Query Execution
-
-**Goal**: Run queries against DynamoDB from the Tabularis query editor.
-
-1. **Query modes** (shebang-prefixed, same pattern as Elasticsearch plugin):
-   - `#!partiql` (default) — Execute PartiQL statements
-   - `#!scan` — Scan a table with optional filter
-   - `#!query` — Query a table (requires key condition)
-   - `#!get` — GetItem by primary key
-
-2. **PartiQL execution** (`#!partiql` or plain):
-   - `ExecuteStatement` — for SELECT, INSERT, UPDATE, DELETE
-   - `ExecuteTransaction` — for multi-statement transactions
-   - Parse results into `{ columns: [...], rows: [...], affected_rows: N }`
-   - Paginate via `NextToken` for large result sets
-   - Example:
-     ```sql
-     SELECT * FROM users WHERE id = 'abc123'
-     INSERT INTO users VALUE {'id': 'abc', 'email': 'a@b.com'}
-     UPDATE users SET email='new@b.com' WHERE id = 'abc'
-     DELETE FROM users WHERE id = 'abc'
-     ```
-
-3. **Scan mode** (`#!scan`):
-   ```
-   #!scan
-   TableName: users
-   FilterExpression: age > :val
-   ExpressionAttributeValues: {":val": {"N": "21"}}
-   Limit: 100
-   ```
-   - Supports `FilterExpression`, `ProjectionExpression`, `Limit`, `ExclusiveStartKey`
-   - Returns column/row format with pagination info
-
-4. **Query mode** (`#!query`):
-   ```
-   #!query
-   TableName: users
-   KeyConditionExpression: id = :id
-   ExpressionAttributeValues: {":id": {"S": "abc123"}}
-   ```
-   - Requires `KeyConditionExpression`
-   - Supports `FilterExpression`, `Limit`, `IndexName` (for GSIs)
-
-5. **GetItem** (`#!get`):
-   ```
-   #!get
-   TableName: users
-   Key: {"id": {"S": "abc123"}}
-   ```
-
-6. **Result format** — matches existing plugin conventions:
-   ```json
-   {
-     "columns": ["id", "email", "age"],
-     "rows": [["abc", "a@b.com", "30"]],
-     "affected_rows": 1,
-     "execution_time_ms": 42,
-     "truncated": false,
-     "has_more": false,
-     "pagination": null
-   }
-   ```
-
-7. **Safety limits**:
-   - Hard cap on `Scan` segment size (e.g., 1MB or 1000 items)
-   - Confirmation dialog for `DeleteTable` / `DROP TABLE`
-   - Read capacity unit awareness (display `ConsumedCapacity`)
-
----
-
-### Phase 4 — CRUD Operations
-
-**Goal**: Inline cell editing in Tabularis data grid.
-
-1. **`insert_record`** → `PutItem` with the provided data map
-   - Handle condition expressions for idempotent inserts
-   - Return `{ affected_rows: 1 }`
-
-2. **`update_record`** → `UpdateItem`:
-   - `pk_col` + `pk_val` identify the item
-   - `col_name` + `new_val` → `UpdateExpression: SET #col = :val`
-   - Return `{ affected_rows: 1 }`
-
-3. **`delete_record`** → `DeleteItem`:
-   - `pk_col` + `pk_val` identify the item
-   - Return `{ affected_rows: 1 }`
-
----
-
-### Phase 5 — DDL Operations
-
-**Goal**: Generate SQL snippets for schema changes.
-
-1. **`get_create_table_sql`** → Generate PartiQL `CREATE TABLE` statement with key schema
-2. **`get_add_column_sql`** → PartiQL `ALTER TABLE ADD COLUMN` (DynamoDB supports this)
-3. **`get_alter_column_sql`** → PartiQL `ALTER TABLE MODIFY` (limited support)
-4. **`get_create_index_sql`** → PartiQL `CREATE INDEX` for GSI creation
-5. **`drop_index`** → PartiQL `DROP INDEX`
-
----
-
-### Phase 6 — Polish & Advanced
-
-**Goal**: Production-ready, tested, documented.
-
-1. **Local DynamoDB testing**:
-   - `just run-dynamodb` — starts DynamoDB Local via Docker
-   - `just seed-dynamodb` — seeds test tables and data
-   - Integration tests against local DynamoDB
-
-2. **UI extension** (`ui/`):
-   - Connection form with AWS region selector, credential fields, profile picker
-   - DynamoDB-specific query builder (key condition, filter expression helpers)
-
-3. **Performance**:
-   - Connection pool caching (reuse SDK config between requests)
-   - Pagination tokens for large table listings
-   - Concurrent request handling via worker pool
-
-4. **Documentation**:
-   - README with usage examples, installation, build instructions
-   - CHANGELOG.md
-   - CLAUDE.md for AI-assisted development
-
-5. **CI/CD**:
-   - GitHub Actions release workflow (same as Elasticsearch plugin)
-   - Cross-platform builds (Linux, macOS, Windows)
-   - `cargo test` + `cargo clippy` in CI
-
----
-
-## AWS Credential Resolution
-
-The plugin supports multiple authentication methods, resolved in order:
-
-1. **Explicit** — `access_key_id` + `secret_access_key` + `region` in connection params
-2. **Session token** — `session_token` for temporary credentials (STS)
-3. **AWS profile** — `profile` field names a profile in `~/.aws/credentials`
-4. **Environment** — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
-5. **IMDS** — EC2 instance metadata / ECS task role
-
-For local development, `endpoint` can be set to `http://localhost:8000` (DynamoDB Local).
-
-## manifest.json
-
-```json
-{
-  "id": "dynamodb",
-  "name": "DynamoDB",
-  "version": "0.1.0",
-  "description": "Tabularis driver plugin for AWS DynamoDB",
-  "default_port": 8000,
-  "executable": "tabularis-dynamodb-plugin",
-  "capabilities": {
-    "schemas": true,
-    "views": false,
-    "routines": false,
-    "file_based": false,
-    "connection_string": true,
-    "connection_uri": true,
-    "identifier_quote": "\"",
-    "alter_primary_key": false,
-    "readonly": false,
-    "manage_tables": true
-  },
-  "data_types": [
-    { "name": "STRING", "category": "string", "requires_length": false, "requires_precision": false },
-    { "name": "NUMBER", "category": "numeric", "requires_length": false, "requires_precision": false },
-    { "name": "BINARY", "category": "binary", "requires_length": false, "requires_precision": false },
-    { "name": "BOOLEAN", "category": "boolean", "requires_length": false, "requires_precision": false },
-    { "name": "STRING_SET", "category": "other", "requires_length": false, "requires_precision": false },
-    { "name": "NUMBER_SET", "category": "other", "requires_length": false, "requires_precision": false },
-    { "name": "BINARY_SET", "category": "other", "requires_length": false, "requires_precision": false },
-    { "name": "LIST", "category": "json", "requires_length": false, "requires_precision": false },
-    { "name": "MAP", "category": "json", "requires_length": false, "requires_precision": false },
-    { "name": "NULL", "category": "other", "requires_length": false, "requires_precision": false }
-  ]
-}
-```
+<div align="center">
+  <img src="https://raw.githubusercontent.com/debba/tabularis/main/public/logo-sm.png" width="120" height="120" />
+</div>
+
+# tabularis-dynamodb-plugin
+
+<p align="center">
+
+![](https://img.shields.io/github/release/tabularisDB/tabularis-dynamodb-plugin.svg?style=flat)
+![](https://img.shields.io/github/downloads/tabularisDB/tabularis-dynamodb-plugin/total.svg?style=flat)
+![Build & Release](https://github.com/tabularisDB/tabularis-dynamodb-plugin/workflows/Release/badge.svg)
+[![Discord](https://img.shields.io/discord/1502944695808950282?color=5865F2&logo=discord&logoColor=white)](https://discord.com/invite/K2hmhfHRSt)
+
+</p>
+
+A [DynamoDB](https://aws.amazon.com/dynamodb/) plugin for [Tabularis](https://github.com/TabularisDB/tabularis), the lightweight database management tool.
+
+This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local instances, providing table browsing, schema inspection, PartiQL query execution, and full CRUD operations through a JSON-RPC 2.0 over stdio interface.
+
+**Discord** - [Join our discord server](https://discord.com/invite/K2hmhfHRSt) and chat with the maintainers.
+
+## Table of Contents
+
+- [Features](#features)
+- [Connection Configuration](#connection-configuration)
+- [Supported DynamoDB Data Types](#supported-dynamodb-data-types)
+- [Installation](#installation)
+  - [Automatic (via Tabularis)](#automatic-via-tabularis)
+  - [Manual Installation](#manual-installation)
+- [How It Works](#how-it-works)
+- [Query Syntax](#query-syntax)
+- [Supported Operations](#supported-operations)
+- [Building from Source](#building-from-source)
+- [Development](#development)
+- [Changelog](#changelog)
+- [License](#license)
+
+## Features
+
+- **Connection** — Connect using explicit AWS credentials (Access Key/Secret Key), AWS profiles, environment variables, or IAM roles. Supports AWS regions and custom endpoints for DynamoDB Local.
+- **Table Browsing** — List all tables in the connected region and inspect their schemas.
+- **Schema Inspection** — View table attribute definitions, key schema (partition key and sort key), and data types.
+- **Index Inspection** — List global secondary indexes (GSI) and local secondary indexes (LSI) for each table.
+- **Query Execution** — Run PartiQL queries using four modes: `#!partiql`, `#!scan`, `#!query`, and `#!get`.
+- **Inline Editing** — Insert, update, and delete items directly from the Tabularis data grid.
+- **DDL-equivalent Generation** — Generates PartiQL statements for `CREATE TABLE`, `ADD COLUMN`, and `CREATE INDEX`.
+- **Cross-platform** — Pre-built binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+- **DynamoDB Local Support** — Full compatibility with DynamoDB Local for offline development and testing.
+
+## Connection Configuration
+
+The plugin supports multiple authentication methods, resolved in the following order:
+
+1. **Explicit credentials** — Pass `access_key_id`, `secret_access_key`, and `region` directly in the connection parameters.
+2. **Session token** — Add `session_token` for temporary credentials (e.g., from AWS STS).
+3. **AWS profile** — Specify `profile` to use a profile from `~/.aws/credentials`.
+4. **Environment variables** — The plugin reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` from the environment.
+5. **IMDS** — Automatically uses EC2 instance metadata or ECS task roles when running on AWS infrastructure.
+
+For DynamoDB Local, set `endpoint` to `http://localhost:8000` to override the default AWS endpoint.
+
+### Connection Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `region` | AWS region (e.g., `us-east-1`, `ap-southeast-2`) | Yes |
+| `access_key_id` | AWS access key ID | If not using profile/env |
+| `secret_access_key` | AWS secret access key | If not using profile/env |
+| `session_token` | Temporary session token (for STS) | No |
+| `profile` | AWS profile name | No |
+| `endpoint` | Custom endpoint URL (for DynamoDB Local) | No |
+
+## Supported DynamoDB Data Types
+
+| Category | Types |
+|---|---|
+| **Scalar** | STRING, NUMBER, BINARY, BOOLEAN, NULL |
+| **Set** | STRING_SET, NUMBER_SET, BINARY_SET |
+| **Structured** | LIST, MAP |
 
 ## Installation
 
-```bash
-# Build and install locally
-just dev-install
+### Automatic (via Tabularis)
 
-# Or build manually
-cargo build --release
-# Binary: target/release/tabularis-dynamodb-plugin
+If your version of Tabularis supports plugin management, the DynamoDB plugin can be installed directly from the application.
+
+### Manual Installation
+
+1. Download the latest release for your platform from the [Releases page](https://github.com/TabularisDB/tabularis-dynamodb-plugin/releases).
+2. Extract the archive.
+3. Copy `tabularis-dynamodb-plugin` (or `tabularis-dynamodb-plugin.exe` on Windows) and `manifest.json` into the Tabularis plugins directory:
+
+| OS | Plugins Directory |
+|---|---|
+| **Linux** | `~/.local/share/tabularis/plugins/dynamodb/` |
+| **macOS** | `~/Library/Application Support/com.debba.tabularis/plugins/dynamodb/` |
+| **Windows** | `%APPDATA%\debba\tabularis\data\plugins\dynamodb\` |
+
+4. Restart Tabularis.
+
+## How It Works
+
+The plugin is a standalone Rust binary that communicates with Tabularis through **JSON-RPC 2.0 over stdio**:
+
+1. Tabularis spawns the plugin as a child process.
+2. Requests are sent as newline-delimited JSON-RPC messages to the plugin's `stdin`.
+3. The plugin connects to DynamoDB using the official AWS SDK for Rust and writes responses to `stdout`.
+
+Connection state is pooled — AWS SDK configs are cached with a 30-minute TTL to avoid re-creating credentials for every request.
+
+## Query Syntax
+
+The `execute_query` method supports four query modes, determined by an optional shebang (`#!`) at the beginning of the query:
+
+### PartiQL Mode (default)
+
+```sql
+SELECT * FROM users WHERE id = 'user123'
+SELECT * FROM orders WHERE user_id = 'user123' AND order_date > '2024-01-01'
 ```
 
-Copy the binary and `manifest.json` to the Tabularis plugins folder:
+You can also explicitly specify the mode:
 
-| OS | Path |
-|----|------|
-| Linux | `~/.local/share/tabularis/plugins/dynamodb/` |
-| macOS | `~/Library/Application Support/tabularis/plugins/dynamodb/` |
-| Windows | `%APPDATA%\debba\tabularis\data\plugins\dynamodb\` |
+```sql
+#!partiql
+SELECT * FROM users WHERE id = 'user123'
+```
 
-Restart Tabularis and pick **DynamoDB** in the connection form.
+### Scan Mode
+
+```sql
+#!scan
+TableName: users
+FilterExpression: age > :val
+ExpressionAttributeValues: {":val": {"N": "25"}}
+```
+
+### Query Mode (requires key condition)
+
+```sql
+#!query
+TableName: users
+KeyConditionExpression: id = :id
+ExpressionAttributeValues: {":id": {"S": "user123"}}
+```
+
+### Get Mode
+
+```sql
+#!get
+TableName: users
+Key: {"id": {"S": "user123"}}
+```
+
+## Supported Operations
+
+| Method | Description |
+|---|---|
+| `test_connection` | Ping the DynamoDB service by listing tables (limit 1) |
+| `get_tables` | List all tables in the connected region |
+| `get_columns` | Get attribute definitions and key schema for a table |
+| `get_foreign_keys` | Returns `[]` (DynamoDB has no foreign key constraints) |
+| `get_indexes` | List global secondary indexes (GSI) and local secondary indexes (LSI) for a table |
+| `execute_query` | Run PartiQL queries with four modes (partiql, scan, query, get) |
+| `insert_record` | Insert a new item (generates PartiQL INSERT statement) |
+| `update_record` | Update a single attribute by primary key (generates PartiQL UPDATE statement) |
+| `delete_record` | Delete an item by primary key (generates PartiQL DELETE statement) |
+| `get_create_table_sql` | Generates PartiQL `CREATE TABLE` statement |
+| `get_add_column_sql` | Generates PartiQL `ALTER TABLE ADD COLUMN` statement |
+| `get_alter_column_sql` | Generates PartiQL `ALTER TABLE MODIFY` statement |
+| `get_create_index_sql` | Generates PartiQL `CREATE INDEX` statement for GSI creation |
+| `get_create_foreign_key_sql` | Returns a not-supported note |
+| `drop_index` | Generates PartiQL `DROP INDEX` statement |
+| `drop_foreign_key` | Returns a not-supported note |
+
+## Building from Source
+
+### Prerequisites
+
+- [Rust](https://www.rust-lang.org/tools/install) (edition 2021)
+- A running DynamoDB Local instance (for integration tests)
+
+### Build
+
+```bash
+cargo build --release
+```
+
+The binary will be located at `target/release/tabularis-dynamodb-plugin`.
+
+### Install Locally
+
+Use the provided justfile recipes:
+
+```bash
+# Install to Tabularis plugins directory
+just dev-install
+
+# Or manually copy
+cp target/release/tabularis-dynamodb-plugin ~/.local/share/tabularis/plugins/dynamodb/
+cp manifest.json ~/.local/share/tabularis/plugins/dynamodb/
+```
 
 ## Development
 
+### Testing the Plugin
+
+**Simulated Tabularis integration test** (interactive REPL for testing RPC handlers):
+
 ```bash
-# Run DynamoDB Local
-just run-dynamodb
-
-# Seed test data
-just seed-dynamodb
-
-# Launch REPL for testing RPC handlers locally
-just repl
-
-# Build
-just build
-
-# Run tests
-just test
-
-# Lint
-just lint
+cargo run --bin test_plugin
 ```
 
-## References
+The REPL provides shortcuts:
 
-- [Tabularis Plugin Guide](https://github.com/TabularisDB/tabularis/blob/main/plugins/PLUGIN_GUIDE.md)
-- [MongoDB Plugin](https://github.com/TabularisDB/tabularis-mongodb-plugin) — reference for CRUD, DDL, and stdio transport
-- [Elasticsearch Plugin](https://github.com/TabularisDB/tabularis-elasticsearch-plugin) — reference for query modes, connection pooling, and worker pool architecture
-- [Issue #502](https://github.com/TabularisDB/tabularis/issues/502) — DynamoDB support request
+| Command | Description |
+|---------|-------------|
+| `:init` | Send initialize request |
+| `:ping` | Send ping request |
+| `:tables` | Send get_tables request |
+| `:help` | Show available commands |
+| `:exit` / `:q` | Exit the REPL |
+| `<json>` | Send any raw JSON-RPC request |
+
+### Setting Up DynamoDB Local
+
+Start DynamoDB Local via Docker:
+
+```bash
+docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb
+```
+
+Seed test data:
+
+```bash
+just seed-dynamodb
+```
+
+### Running Tests
+
+```bash
+# Unit tests
+cargo test
+
+# Integration tests (requires DynamoDB Local)
+cargo test --test integration_test
+```
+
+### Manual JSON-RPC test via shell
+
+```bash
+echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"us-east-1","access_key_id":"fake","secret_access_key":"fake","endpoint":"http://localhost:8000"}},"id":1}' \
+  | ./target/release/tabularis-dynamodb-plugin
+```
+
+### Tech Stack
+
+- **Language:** Rust (edition 2021)
+- **Database driver:** [aws-sdk-dynamodb](https://crates.io/crates/aws-sdk-dynamodb) (official AWS SDK for Rust)
+- **Serialization:** serde + serde_json
+- **Async runtime:** tokio
+- **Protocol:** JSON-RPC 2.0 over stdio
+
+## [Changelog](./CHANGELOG.md)
 
 ## License
 
-Apache-2.0.
+Apache License 2.0
