@@ -265,7 +265,7 @@ echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"
 
 ## Maintainers
 
-* @erwin-lovecraft
+* @fuleinist
 
 ## License
 
