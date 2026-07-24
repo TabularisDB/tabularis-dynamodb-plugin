@@ -93,7 +93,7 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
@@ -146,7 +146,7 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
@@ -191,7 +191,7 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn value_to_partiql_literal_number() {
         assert_eq!(value_to_partiql_literal(&json!(42)), "42");
-        assert_eq!(value_to_partiql_literal(&json!(3.14)), "3.14");
+        assert_eq!(value_to_partiql_literal(&json!(2.71)), "2.71");
     }
 
     #[test]

@@ -55,7 +55,7 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
@@ -93,7 +93,7 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
@@ -133,7 +133,7 @@ pub async fn get_indexes(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, &err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
         }
     };
 
