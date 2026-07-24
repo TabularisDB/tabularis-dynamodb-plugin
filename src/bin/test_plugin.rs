@@ -61,7 +61,8 @@ async fn main() {
                 continue;
             }
             ":tables" => {
-                let req = r#"{"jsonrpc":"2.0","method":"get_tables","id":1,"params":{"params":{}}}"#;
+                let req =
+                    r#"{"jsonrpc":"2.0","method":"get_tables","id":1,"params":{"params":{}}}"#;
                 println!(">>> {req}");
                 let resp = tabularis_dynamodb_plugin::rpc::handle_line(req).await;
                 println!("<<< {}", serde_json::to_string_pretty(&resp).unwrap());

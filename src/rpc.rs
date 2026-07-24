@@ -53,7 +53,9 @@ pub async fn handle_line(line: &str) -> Value {
         "get_add_column_sql" => handlers::ddl::get_add_column_sql(id, &params).await,
         "get_alter_column_sql" => handlers::ddl::get_alter_column_sql(id, &params).await,
         "get_create_index_sql" => handlers::ddl::get_create_index_sql(id, &params).await,
-        "get_create_foreign_key_sql" => handlers::ddl::get_create_foreign_key_sql(id, &params).await,
+        "get_create_foreign_key_sql" => {
+            handlers::ddl::get_create_foreign_key_sql(id, &params).await
+        }
         "drop_index" => handlers::ddl::drop_index(id, &params).await,
         "drop_foreign_key" => handlers::ddl::drop_foreign_key(id, &params).await,
 

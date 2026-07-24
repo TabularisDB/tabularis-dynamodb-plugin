@@ -38,62 +38,75 @@ async fn build_client(params: &Value) -> Result<Client, Value> {
         .and_then(|p| p.get("endpoint"))
         .and_then(|r| r.as_str());
 
-    Client::new(region, access_key_id, secret_access_key, session_token, profile, endpoint)
-        .await
-        .map_err(|e| {
-            json!({
-                "code": ErrorCode::InternalError.value(),
-                "message": e.to_string()
-            })
+    Client::new(
+        region,
+        access_key_id,
+        secret_access_key,
+        session_token,
+        profile,
+        endpoint,
+    )
+    .await
+    .map_err(|e| {
+        json!({
+            "code": ErrorCode::InternalError.value(),
+            "message": e.to_string()
         })
+    })
 }
 
 pub async fn insert_record(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     if table.is_empty() {
-        return error_response(id, ErrorCode::InvalidParams, "table must be a non-empty string");
+        return error_response(
+            id,
+            ErrorCode::InvalidParams,
+            "table must be a non-empty string",
+        );
     }
 
-    let data = params
-        .get("data")
-        .and_then(|d| d.as_object())
-        .map(|obj| {
-            // Convert JSON data map to a PartiQL-compatible INSERT statement
-            let cols: Vec<String> = obj.keys().cloned().collect();
-            let vals: Vec<String> = obj
-                .values()
-                .map(|v| match v {
-                    Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Null => "NULL".to_string(),
-                    _ => format!("'{}'", v.to_string().replace('\'', "''")),
-                })
-                .collect();
+    let data = params.get("data").and_then(|d| d.as_object()).map(|obj| {
+        // Convert JSON data map to a PartiQL-compatible INSERT statement
+        let cols: Vec<String> = obj.keys().cloned().collect();
+        let vals: Vec<String> = obj
+            .values()
+            .map(|v| match v {
+                Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Null => "NULL".to_string(),
+                _ => format!("'{}'", v.to_string().replace('\'', "''")),
+            })
+            .collect();
 
-            format!(
-                "INSERT INTO \"{}\" VALUE {{ {} }}",
-                table,
-                cols.iter()
-                    .zip(vals.iter())
-                    .map(|(c, v)| format!("'{}': {}", c, v))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        });
+        format!(
+            "INSERT INTO \"{}\" VALUE {{ {} }}",
+            table,
+            cols.iter()
+                .zip(vals.iter())
+                .map(|(c, v)| format!("'{}': {}", c, v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
 
     let Some(statement) = data else {
-        return error_response(id, ErrorCode::InvalidParams, "data must be a non-empty object");
+        return error_response(
+            id,
+            ErrorCode::InvalidParams,
+            "data must be a non-empty object",
+        );
     };
 
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
@@ -104,19 +117,17 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
 }
 
 pub async fn update_record(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     if table.is_empty() {
-        return error_response(id, ErrorCode::InvalidParams, "table must be a non-empty string");
+        return error_response(
+            id,
+            ErrorCode::InvalidParams,
+            "table must be a non-empty string",
+        );
     }
 
-    let pk_col = params
-        .get("pk_col")
-        .and_then(|p| p.as_str())
-        .unwrap_or("");
+    let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
 
     let pk_val = params.get("pk_val");
     let col_name = params
@@ -146,7 +157,11 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
@@ -157,19 +172,17 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
 }
 
 pub async fn delete_record(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     if table.is_empty() {
-        return error_response(id, ErrorCode::InvalidParams, "table must be a non-empty string");
+        return error_response(
+            id,
+            ErrorCode::InvalidParams,
+            "table must be a non-empty string",
+        );
     }
 
-    let pk_col = params
-        .get("pk_col")
-        .and_then(|p| p.as_str())
-        .unwrap_or("");
+    let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
 
     let pk_val = params.get("pk_val");
 
@@ -191,7 +204,11 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
@@ -255,10 +272,7 @@ mod tests {
 
     #[test]
     fn value_to_partiql_literal_string_with_quote() {
-        assert_eq!(
-            value_to_partiql_literal(&json!("it's")),
-            "'it''s'"
-        );
+        assert_eq!(value_to_partiql_literal(&json!("it's")), "'it''s'");
     }
 
     #[test]

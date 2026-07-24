@@ -108,10 +108,7 @@ pub fn dynamo_item_to_row(
                 .and_then(|v| {
                     // DynamoDB returns typed values like {"S": "hello"}, {"N": "42"}
                     // Extract the actual value
-                    v.as_object()
-                        .and_then(|obj| {
-                            obj.values().next().cloned()
-                        })
+                    v.as_object().and_then(|obj| obj.values().next().cloned())
                 })
                 .unwrap_or(Value::Null)
         })
@@ -146,7 +143,8 @@ mod tests {
 
     #[test]
     fn parse_query_mode() {
-        let q = Query::from("#!query\nTableName: users\nKeyConditionExpression: id = :id".to_string());
+        let q =
+            Query::from("#!query\nTableName: users\nKeyConditionExpression: id = :id".to_string());
         assert_eq!(q.mode, QueryMode::Query);
         assert!(q.body.contains("KeyConditionExpression"));
     }

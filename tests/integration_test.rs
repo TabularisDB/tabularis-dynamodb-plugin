@@ -84,31 +84,28 @@ async fn full_malformed_json_flow() {
 
 #[tokio::test]
 async fn full_execute_query_empty_flow() {
-    let req = r#"{"jsonrpc":"2.0","method":"execute_query","id":8,"params":{"params":{},"query":""}}"#;
+    let req =
+        r#"{"jsonrpc":"2.0","method":"execute_query","id":8,"params":{"params":{},"query":""}}"#;
     let resp = rpc::handle_line(req).await;
 
     assert!(resp.get("error").is_some());
-    assert_eq!(
-        resp["error"]["message"],
-        "query must be a non-empty string"
-    );
+    assert_eq!(resp["error"]["message"], "query must be a non-empty string");
 }
 
 #[tokio::test]
 async fn full_get_columns_empty_table_flow() {
-    let req = r#"{"jsonrpc":"2.0","method":"get_columns","id":9,"params":{"params":{},"table":""}}"#;
+    let req =
+        r#"{"jsonrpc":"2.0","method":"get_columns","id":9,"params":{"params":{},"table":""}}"#;
     let resp = rpc::handle_line(req).await;
 
     assert!(resp.get("error").is_some());
-    assert_eq!(
-        resp["error"]["message"],
-        "table must be a non-empty string"
-    );
+    assert_eq!(resp["error"]["message"], "table must be a non-empty string");
 }
 
 #[tokio::test]
 async fn full_get_indexes_empty_table_flow() {
-    let req = r#"{"jsonrpc":"2.0","method":"get_indexes","id":10,"params":{"params":{},"table":""}}"#;
+    let req =
+        r#"{"jsonrpc":"2.0","method":"get_indexes","id":10,"params":{"params":{},"table":""}}"#;
     let resp = rpc::handle_line(req).await;
 
     assert!(resp.get("error").is_some());
@@ -169,7 +166,8 @@ async fn full_drop_index_flow() {
 
 #[tokio::test]
 async fn full_get_create_foreign_key_sql_flow() {
-    let req = r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","id":17,"params":{"params":{}}}"#;
+    let req =
+        r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","id":17,"params":{"params":{}}}"#;
     let resp = rpc::handle_line(req).await;
 
     let statements = resp["result"].as_array().unwrap();
@@ -217,8 +215,8 @@ async fn full_partiql_query_mode_detection() {
 
 #[tokio::test]
 async fn full_execute_query_response_serialization() {
-    use tabularis_dynamodb_plugin::handlers::models::ExecuteQueryResponse;
     use serde_json::json;
+    use tabularis_dynamodb_plugin::handlers::models::ExecuteQueryResponse;
 
     let resp = ExecuteQueryResponse {
         columns: vec!["id".into(), "name".into()],

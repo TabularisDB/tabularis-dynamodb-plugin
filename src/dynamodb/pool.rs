@@ -55,13 +55,7 @@ pub async fn get_config(
     // If explicit credentials are provided, use them
     if let (Some(akid), Some(sak)) = (access_key_id, secret_access_key) {
         let session = session_token.map(|s| s.to_string());
-        let creds = Credentials::new(
-            akid.to_string(),
-            sak.to_string(),
-            session,
-            None,
-            "explicit",
-        );
+        let creds = Credentials::new(akid.to_string(), sak.to_string(), session, None, "explicit");
         config_builder = config_builder.credentials_provider(creds);
     }
 
@@ -72,28 +66,28 @@ pub async fn get_config(
 
     // If a region is specified, use it
     if let Some(region_str) = region {
-        config_builder = config_builder.region(
-            aws_config::Region::new(region_str.to_string()),
-        );
+        config_builder = config_builder.region(aws_config::Region::new(region_str.to_string()));
     }
 
     let sdk_config = config_builder.load().await;
 
     // Build DynamoDB-specific config
     let mut dynamo_config_builder = Config::builder();
-    dynamo_config_builder = dynamo_config_builder
-        .region(sdk_config.region().cloned().unwrap_or_else(|| aws_config::Region::new("us-east-1")));
+    dynamo_config_builder = dynamo_config_builder.region(
+        sdk_config
+            .region()
+            .cloned()
+            .unwrap_or_else(|| aws_config::Region::new("us-east-1")),
+    );
 
     // Copy credentials provider from SDK config
     if let Some(creds_provider) = sdk_config.credentials_provider() {
-        dynamo_config_builder = dynamo_config_builder
-            .credentials_provider(creds_provider.clone());
+        dynamo_config_builder = dynamo_config_builder.credentials_provider(creds_provider.clone());
     }
 
     // If an endpoint override is provided (for DynamoDB Local), use it
     if let Some(endpoint_str) = endpoint {
-        dynamo_config_builder = dynamo_config_builder
-            .endpoint_url(endpoint_str);
+        dynamo_config_builder = dynamo_config_builder.endpoint_url(endpoint_str);
     }
 
     let config = dynamo_config_builder.build();
@@ -128,10 +122,7 @@ mod tests {
         let config = get_config(Some("us-east-1"), None, None, None, None, None)
             .await
             .expect("should build config");
-        assert_eq!(
-            config.region().map(|r| r.as_ref()),
-            Some("us-east-1")
-        );
+        assert_eq!(config.region().map(|r| r.as_ref()), Some("us-east-1"));
     }
 
     #[tokio::test]

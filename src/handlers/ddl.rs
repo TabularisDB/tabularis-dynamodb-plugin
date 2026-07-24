@@ -32,10 +32,7 @@ pub async fn get_create_table_sql(id: Value, params: &Value) -> Value {
 
 /// Generate a PartiQL ALTER TABLE ADD COLUMN statement.
 pub async fn get_add_column_sql(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     let column_name = params
         .get("column")
@@ -67,10 +64,7 @@ pub async fn get_add_column_sql(id: Value, params: &Value) -> Value {
 
 /// Generate a PartiQL ALTER TABLE MODIFY statement.
 pub async fn get_alter_column_sql(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     let old_name = params
         .get("old_column")
@@ -105,10 +99,7 @@ pub async fn get_alter_column_sql(id: Value, params: &Value) -> Value {
 
 /// Generate a PartiQL CREATE INDEX statement.
 pub async fn get_create_index_sql(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     let columns: Vec<String> = params
         .get("columns")
@@ -142,10 +133,7 @@ pub async fn get_create_index_sql(id: Value, params: &Value) -> Value {
 
 /// Generate a PartiQL DROP INDEX statement.
 pub async fn drop_index(id: Value, params: &Value) -> Value {
-    let table = params
-        .get("table")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
     let index_name = params
         .get("index_name")

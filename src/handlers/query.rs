@@ -40,18 +40,25 @@ async fn build_client(params: &Value) -> Result<Client, (Value, Value)> {
         .and_then(|p| p.get("endpoint"))
         .and_then(|r| r.as_str());
 
-    Client::new(region, access_key_id, secret_access_key, session_token, profile, endpoint)
-        .await
-        .map_err(|e| {
-            (
-                Value::Null,
-                json!({
-                    "jsonrpc": "2.0",
-                    "error": { "code": ErrorCode::InternalError.value(), "message": e.to_string() },
-                    "id": Value::Null,
-                }),
-            )
-        })
+    Client::new(
+        region,
+        access_key_id,
+        secret_access_key,
+        session_token,
+        profile,
+        endpoint,
+    )
+    .await
+    .map_err(|e| {
+        (
+            Value::Null,
+            json!({
+                "jsonrpc": "2.0",
+                "error": { "code": ErrorCode::InternalError.value(), "message": e.to_string() },
+                "id": Value::Null,
+            }),
+        )
+    })
 }
 
 pub async fn test_connection(id: Value, params: &Value) -> Value {
@@ -90,47 +97,43 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     };
 
     match query.mode {
-        QueryMode::Partiql => {
-            match client.execute_statement(&query.body).await {
-                Ok(result) => {
-                    let columns = result
-                        .items
-                        .first()
-                        .map(|item| item.keys().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
+        QueryMode::Partiql => match client.execute_statement(&query.body).await {
+            Ok(result) => {
+                let columns = result
+                    .items
+                    .first()
+                    .map(|item| item.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
 
-                    let rows: Vec<Vec<Value>> = result
-                        .items
-                        .iter()
-                        .map(|item| {
-                            columns
-                                .iter()
-                                .map(|col| {
-                                    item.get(col).cloned().unwrap_or(Value::Null)
-                                })
-                                .collect()
-                        })
-                        .collect();
+                let rows: Vec<Vec<Value>> = result
+                    .items
+                    .iter()
+                    .map(|item| {
+                        columns
+                            .iter()
+                            .map(|col| item.get(col).cloned().unwrap_or(Value::Null))
+                            .collect()
+                    })
+                    .collect();
 
-                    let affected_rows = rows.len();
-                    let has_more = result.next_token.is_some();
+                let affected_rows = rows.len();
+                let has_more = result.next_token.is_some();
 
-                    ok_response(
-                        id,
-                        json!(ExecuteQueryResponse {
-                            columns,
-                            rows,
-                            affected_rows,
-                            execution_time_ms: 0,
-                            truncated: has_more,
-                            has_more,
-                            pagination: result.next_token.map(|t| json!({"next_token": t})),
-                        }),
-                    )
-                }
-                Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+                ok_response(
+                    id,
+                    json!(ExecuteQueryResponse {
+                        columns,
+                        rows,
+                        affected_rows,
+                        execution_time_ms: 0,
+                        truncated: has_more,
+                        has_more,
+                        pagination: result.next_token.map(|t| json!({"next_token": t})),
+                    }),
+                )
             }
-        }
+            Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+        },
         QueryMode::Scan | QueryMode::Query | QueryMode::Get => {
             // For scan/query/get, we treat the body as a PartiQL statement for now
             // Full implementation will parse the YAML-like body and call the appropriate SDK methods
@@ -148,9 +151,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         .map(|item| {
                             columns
                                 .iter()
-                                .map(|col| {
-                                    item.get(col).cloned().unwrap_or(Value::Null)
-                                })
+                                .map(|col| item.get(col).cloned().unwrap_or(Value::Null))
                                 .collect()
                         })
                         .collect();

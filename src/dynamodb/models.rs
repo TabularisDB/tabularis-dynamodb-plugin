@@ -53,7 +53,9 @@ pub struct ExecuteStatementOutput {
 }
 
 impl ExecuteStatementOutput {
-    pub fn from_sdk(response: aws_sdk_dynamodb::operation::execute_statement::ExecuteStatementOutput) -> Self {
+    pub fn from_sdk(
+        response: aws_sdk_dynamodb::operation::execute_statement::ExecuteStatementOutput,
+    ) -> Self {
         // items() returns &[HashMap<String, AttributeValue>]
         let items = response
             .items()
@@ -90,9 +92,7 @@ pub fn attribute_value_to_json(av: &aws_sdk_dynamodb::types::AttributeValue) -> 
             Value::Array(ns.iter().map(|n| Value::String(n.clone())).collect())
         }
         AttributeValue::Bs(_) => Value::Array(vec![]),
-        AttributeValue::L(list) => {
-            Value::Array(list.iter().map(attribute_value_to_json).collect())
-        }
+        AttributeValue::L(list) => Value::Array(list.iter().map(attribute_value_to_json).collect()),
         AttributeValue::M(map) => {
             let mut obj = serde_json::Map::new();
             for (k, v) in map.iter() {
@@ -156,13 +156,19 @@ mod tests {
     #[test]
     fn attribute_value_string_to_json() {
         let av = aws_sdk_dynamodb::types::AttributeValue::S("hello".to_string());
-        assert_eq!(attribute_value_to_json(&av), Value::String("hello".to_string()));
+        assert_eq!(
+            attribute_value_to_json(&av),
+            Value::String("hello".to_string())
+        );
     }
 
     #[test]
     fn attribute_value_number_to_json() {
         let av = aws_sdk_dynamodb::types::AttributeValue::N("42".to_string());
-        assert_eq!(attribute_value_to_json(&av), Value::String("42".to_string()));
+        assert_eq!(
+            attribute_value_to_json(&av),
+            Value::String("42".to_string())
+        );
     }
 
     #[test]
@@ -197,7 +203,10 @@ mod tests {
     #[test]
     fn attribute_value_map_to_json() {
         let mut map = HashMap::new();
-        map.insert("name".to_string(), aws_sdk_dynamodb::types::AttributeValue::S("Alice".into()));
+        map.insert(
+            "name".to_string(),
+            aws_sdk_dynamodb::types::AttributeValue::S("Alice".into()),
+        );
         let av = aws_sdk_dynamodb::types::AttributeValue::M(map);
         let json = attribute_value_to_json(&av);
         assert_eq!(json["name"], Value::String("Alice".to_string()));

@@ -147,10 +147,7 @@ mod tests {
     #[test]
     fn extract_query_returns_query_string() {
         let params = json!({"query": "SELECT * FROM users"});
-        assert_eq!(
-            extract_query(&params),
-            Some("SELECT * FROM users".into())
-        );
+        assert_eq!(extract_query(&params), Some("SELECT * FROM users".into()));
     }
 
     #[test]

@@ -1,8 +1,6 @@
 use aws_sdk_dynamodb::Client as DynamoDbClient;
 
-use crate::dynamodb::models::{
-    ColumnInfo, DescribeTableOutput, ExecuteStatementOutput, IndexInfo,
-};
+use crate::dynamodb::models::{ColumnInfo, DescribeTableOutput, ExecuteStatementOutput, IndexInfo};
 use crate::dynamodb::pool;
 use crate::error::PluginError;
 
@@ -67,9 +65,7 @@ impl Client {
             // table_names() returns &[String]
             table_names.extend(response.table_names().iter().cloned());
 
-            last_evaluated_table_name = response
-                .last_evaluated_table_name()
-                .map(|s| s.to_string());
+            last_evaluated_table_name = response.last_evaluated_table_name().map(|s| s.to_string());
 
             if last_evaluated_table_name.is_none() {
                 break;
@@ -80,7 +76,10 @@ impl Client {
     }
 
     /// Describe a table (schema, indexes, status).
-    pub async fn describe_table(&self, table_name: &str) -> Result<DescribeTableOutput, PluginError> {
+    pub async fn describe_table(
+        &self,
+        table_name: &str,
+    ) -> Result<DescribeTableOutput, PluginError> {
         let response = self
             .inner
             .describe_table()
@@ -89,9 +88,9 @@ impl Client {
             .await
             .map_err(|e| PluginError::internal(format!("DescribeTable failed: {e}")))?;
 
-        let table = response.table().ok_or_else(|| {
-            PluginError::internal(format!("Table '{table_name}' not found"))
-        })?;
+        let table = response
+            .table()
+            .ok_or_else(|| PluginError::internal(format!("Table '{table_name}' not found")))?;
 
         // attribute_definitions() returns &[AttributeDefinition]
         let attribute_definitions: Vec<ColumnInfo> = table
@@ -213,7 +212,10 @@ impl Client {
     }
 
     /// Execute a PartiQL statement.
-    pub async fn execute_statement(&self, statement: &str) -> Result<ExecuteStatementOutput, PluginError> {
+    pub async fn execute_statement(
+        &self,
+        statement: &str,
+    ) -> Result<ExecuteStatementOutput, PluginError> {
         let response = self
             .inner
             .execute_statement()

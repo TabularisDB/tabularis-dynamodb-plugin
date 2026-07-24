@@ -40,14 +40,21 @@ async fn build_client(params: &Value) -> Result<Client, Value> {
         .and_then(|p| p.get("endpoint"))
         .and_then(|r| r.as_str());
 
-    Client::new(region, access_key_id, secret_access_key, session_token, profile, endpoint)
-        .await
-        .map_err(|e| {
-            json!({
-                "code": ErrorCode::InternalError.value(),
-                "message": e.to_string()
-            })
+    Client::new(
+        region,
+        access_key_id,
+        secret_access_key,
+        session_token,
+        profile,
+        endpoint,
+    )
+    .await
+    .map_err(|e| {
+        json!({
+            "code": ErrorCode::InternalError.value(),
+            "message": e.to_string()
         })
+    })
 }
 
 /// Returns the list of tables in DynamoDB.
@@ -55,7 +62,11 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
@@ -93,7 +104,11 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
@@ -133,7 +148,11 @@ pub async fn get_indexes(id: Value, params: &Value) -> Value {
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
-            return error_response(id, ErrorCode::InternalError, err["message"].as_str().unwrap_or("unknown error"));
+            return error_response(
+                id,
+                ErrorCode::InternalError,
+                err["message"].as_str().unwrap_or("unknown error"),
+            );
         }
     };
 
