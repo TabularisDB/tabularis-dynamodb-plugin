@@ -44,7 +44,7 @@ This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local inst
 - **Query Execution** — Run PartiQL queries using four modes: `#!partiql`, `#!scan`, `#!query`, and `#!get`.
 - **Inline Editing** — Insert, update, and delete items directly from the Tabularis data grid.
 - **DDL-equivalent Generation** — Generates PartiQL statements for `CREATE TABLE`, `ADD COLUMN`, and `CREATE INDEX`.
-- **Cross-platform** — Pre-built binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+- **Cross-platform** — Pre-built binaries for Linux (x86_64), macOS (aarch64), and Windows (x86_64).
 - **DynamoDB Local Support** — Full compatibility with DynamoDB Local for offline development and testing.
 
 ## Connection Configuration
@@ -88,7 +88,7 @@ If your version of Tabularis supports plugin management, the DynamoDB plugin can
 
 1. Download the latest release for your platform from the [Releases page](https://github.com/TabularisDB/tabularis-dynamodb-plugin/releases).
 2. Extract the archive.
-3. Copy `tabularis-dynamodb-plugin` (or `tabularis-dynamodb-plugin.exe` on Windows) and `manifest.json` into the Tabularis plugins directory:
+3. Copy `dynamodb-plugin` (or `dynamodb-plugin.exe` on Windows) and `manifest.json` into the Tabularis plugins directory:
 
 | OS | Plugins Directory |
 |---|---|
@@ -186,7 +186,7 @@ Key: {"id": {"S": "user123"}}
 cargo build --release
 ```
 
-The binary will be located at `target/release/tabularis-dynamodb-plugin`.
+The binary will be located at `target/release/dynamodb-plugin`.
 
 ### Install Locally
 
@@ -197,7 +197,7 @@ Use the provided justfile recipes:
 just dev-install
 
 # Or manually copy
-cp target/release/tabularis-dynamodb-plugin ~/.local/share/tabularis/plugins/dynamodb/
+cp target/release/dynamodb-plugin ~/.local/share/tabularis/plugins/dynamodb/
 cp manifest.json ~/.local/share/tabularis/plugins/dynamodb/
 ```
 
@@ -250,7 +250,7 @@ cargo test --test integration_test
 
 ```bash
 echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"us-east-1","access_key_id":"fake","secret_access_key":"fake","endpoint":"http://localhost:8000"}},"id":1}' \
-  | ./target/release/tabularis-dynamodb-plugin
+  | ./target/release/dynamodb-plugin
 ```
 
 ### Tech Stack
@@ -263,6 +263,10 @@ echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"
 
 ## [Changelog](./CHANGELOG.md)
 
+## Maintainers
+
+* @erwin-lovecraft
+
 ## License
 
-Apache License 2.0
+Apache-2.0.

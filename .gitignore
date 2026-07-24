@@ -1,4 +1,12 @@
-/target
+ui/node_modules
+ui/dist
+target/
+debug/
+
+.idea/
+.vscode/
+.zed/
+
 *.swp
 *.swo
 .DS_Store

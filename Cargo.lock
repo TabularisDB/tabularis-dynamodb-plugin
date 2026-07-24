@@ -674,6 +674,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dynamodb-plugin"
+version = "0.1.0"
+dependencies = [
+ "assert-json-diff",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1680,19 +1693,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "tabularis-dynamodb-plugin"
-version = "0.1.0"
-dependencies = [
- "assert-json-diff",
- "aws-config",
- "aws-sdk-dynamodb",
- "serde",
- "serde_json",
- "tokio",
- "url",
 ]
 
 [[package]]

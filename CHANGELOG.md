@@ -19,3 +19,27 @@
 - 78 unit tests covering all modules
 - GitHub Actions release workflow (cross-platform builds)
 - `justfile` with development recipes
+
+### Changed
+
+- Rename plugin binary and release assets from `tabularis-dynamodb-plugin` to
+  `dynamodb-plugin` to match the org-wide plugin naming convention (e.g.
+  `elasticsearch-plugin`). `Cargo.toml` package/`[[bin]]` name, `manifest.json`
+  `executable`, and the release archive names are updated accordingly.
+- `manifest.json` now references the plugin manifest `$schema` and uses the
+  standard capability key set (`folder_based`, `no_connection_required`,
+  `alter_column`, `create_foreign_keys`).
+- Release workflow gains a forward-compatible UI-extension build step (no-op
+  until a `ui/` folder is added) and ships `dynamodb-plugin-<platform>.zip`
+  artifacts.
+- `justfile` `dev-install`/`uninstall` are split per OS (linux/macos/windows),
+  fixing the macOS plugin directory path, and `build`/`release` now chain a
+  `build-ui` passthrough.
+
+### Added
+
+- `LICENSE` file (Apache-2.0, matching the license already declared in
+  `Cargo.toml`).
+- `CODEOWNERS`, `.editorconfig`, and Dependabot config (cargo + GitHub Actions,
+  weekly).
+- Expanded `.gitignore` with IDE and build directories.

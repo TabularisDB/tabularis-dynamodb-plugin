@@ -47,7 +47,7 @@ async fn main() {
             ":ping" => {
                 let req = r#"{"jsonrpc":"2.0","method":"ping","id":1,"params":{"params":{}}}"#;
                 println!(">>> {req}");
-                let resp = tabularis_dynamodb_plugin::rpc::handle_line(req).await;
+                let resp = dynamodb_plugin::rpc::handle_line(req).await;
                 println!("<<< {}", serde_json::to_string_pretty(&resp).unwrap());
                 println!();
                 continue;
@@ -55,7 +55,7 @@ async fn main() {
             ":init" => {
                 let req = r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#;
                 println!(">>> {req}");
-                let resp = tabularis_dynamodb_plugin::rpc::handle_line(req).await;
+                let resp = dynamodb_plugin::rpc::handle_line(req).await;
                 println!("<<< {}", serde_json::to_string_pretty(&resp).unwrap());
                 println!();
                 continue;
@@ -64,7 +64,7 @@ async fn main() {
                 let req =
                     r#"{"jsonrpc":"2.0","method":"get_tables","id":1,"params":{"params":{}}}"#;
                 println!(">>> {req}");
-                let resp = tabularis_dynamodb_plugin::rpc::handle_line(req).await;
+                let resp = dynamodb_plugin::rpc::handle_line(req).await;
                 println!("<<< {}", serde_json::to_string_pretty(&resp).unwrap());
                 println!();
                 continue;
@@ -72,7 +72,7 @@ async fn main() {
             _ => {}
         }
 
-        let response = tabularis_dynamodb_plugin::rpc::handle_line(trimmed).await;
+        let response = dynamodb_plugin::rpc::handle_line(trimmed).await;
         let body = serde_json::to_string_pretty(&response).unwrap();
         println!("{body}");
         println!();
