@@ -46,7 +46,7 @@ async fn run_pool_cleanup(mut shutdown_rx: watch::Receiver<bool>) {
     let mut timer = interval(POOL_CLEANUP_INTERVAL);
     loop {
         tokio::select! {
-            _ = timer.tick() => tabularis_dynamodb_plugin::dynamodb::pool::cleanup_pools().await,
+            _ = timer.tick() => dynamodb_plugin::dynamodb::pool::cleanup_pools().await,
             _ = shutdown_rx.changed() => break,
         }
     }
@@ -88,7 +88,7 @@ async fn run_worker(
         };
         let Some(line) = line else { break };
 
-        let response = tabularis_dynamodb_plugin::rpc::handle_line(&line).await;
+        let response = dynamodb_plugin::rpc::handle_line(&line).await;
         let body = match serde_json::to_string(&response) {
             Ok(s) => s,
             Err(err) => format!(

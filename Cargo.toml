@@ -1,5 +1,5 @@
 [package]
-name = "tabularis-dynamodb-plugin"
+name = "dynamodb-plugin"
 version = "0.1.0"
 edition = "2021"
 description = "Tabularis driver plugin for AWS DynamoDB"
@@ -23,7 +23,7 @@ codegen-units = 1
 strip = "symbols"
 
 [[bin]]
-name = "tabularis-dynamodb-plugin"
+name = "dynamodb-plugin"
 path = "src/main.rs"
 
 [[bin]]

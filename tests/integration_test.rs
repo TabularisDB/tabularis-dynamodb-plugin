@@ -5,8 +5,8 @@
 //! DynamoDB instance — they test parsing, dispatch, error handling, and response
 //! formatting.
 
+use dynamodb_plugin::rpc;
 use serde_json::json;
-use tabularis_dynamodb_plugin::rpc;
 
 #[tokio::test]
 async fn full_initialize_flow() {
@@ -198,7 +198,7 @@ async fn full_null_id_handling() {
 
 #[tokio::test]
 async fn full_partiql_query_mode_detection() {
-    use tabularis_dynamodb_plugin::handlers::models::{Query, QueryMode};
+    use dynamodb_plugin::handlers::models::{Query, QueryMode};
 
     let q = Query::from("SELECT * FROM users".to_string());
     assert_eq!(q.mode, QueryMode::Partiql);
@@ -215,8 +215,8 @@ async fn full_partiql_query_mode_detection() {
 
 #[tokio::test]
 async fn full_execute_query_response_serialization() {
+    use dynamodb_plugin::handlers::models::ExecuteQueryResponse;
     use serde_json::json;
-    use tabularis_dynamodb_plugin::handlers::models::ExecuteQueryResponse;
 
     let resp = ExecuteQueryResponse {
         columns: vec!["id".into(), "name".into()],

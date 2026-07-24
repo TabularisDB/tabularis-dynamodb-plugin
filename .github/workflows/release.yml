@@ -40,6 +40,30 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Check for UI extension
+        id: ui
+        shell: bash
+        run: |
+          if [ -f ui/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.ui.outputs.present == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build UI
+        if: steps.ui.outputs.present == 'true'
+        shell: bash
+        working-directory: ui
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -48,9 +72,13 @@ jobs:
         run: |
           STAGE=staging
           mkdir -p "$STAGE"
-          cp target/${{ matrix.target }}/release/tabularis-dynamodb-plugin${{ matrix.binary-suffix }} "$STAGE/"
+          cp target/${{ matrix.target }}/release/dynamodb-plugin${{ matrix.binary-suffix }} "$STAGE/"
           cp manifest.json "$STAGE/"
-          (cd "$STAGE" && zip -r ../tabularis-dynamodb-plugin-${{ matrix.platform-label }}.zip .)
+          if [ -f ui/dist/index.js ]; then
+            mkdir -p "$STAGE/ui/dist"
+            cp ui/dist/index.js "$STAGE/ui/dist/"
+          fi
+          (cd "$STAGE" && zip -r ../dynamodb-plugin-${{ matrix.platform-label }}.zip .)
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -58,11 +86,15 @@ jobs:
         run: |
           $stage = "staging"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\tabularis-dynamodb-plugin${{ matrix.binary-suffix }}" $stage
+          Copy-Item "target\${{ matrix.target }}\release\dynamodb-plugin${{ matrix.binary-suffix }}" $stage
           Copy-Item "manifest.json" $stage
-          Compress-Archive -Path "$stage\*" -DestinationPath "tabularis-dynamodb-plugin-${{ matrix.platform-label }}.zip"
+          if (Test-Path "ui\dist\index.js") {
+            New-Item -ItemType Directory -Force -Path "$stage\ui\dist" | Out-Null
+            Copy-Item "ui\dist\index.js" "$stage\ui\dist"
+          }
+          Compress-Archive -Path "$stage\*" -DestinationPath "dynamodb-plugin-${{ matrix.platform-label }}.zip"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: tabularis-dynamodb-plugin-${{ matrix.platform-label }}.zip
+          files: dynamodb-plugin-${{ matrix.platform-label }}.zip
