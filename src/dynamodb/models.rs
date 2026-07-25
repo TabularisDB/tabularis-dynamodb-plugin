@@ -104,6 +104,27 @@ pub fn attribute_value_to_json(av: &aws_sdk_dynamodb::types::AttributeValue) -> 
     }
 }
 
+/// Convert a serde_json Value to an SDK AttributeValue (for PutItem / typed writes).
+pub fn json_to_attribute_value(v: &Value) -> aws_sdk_dynamodb::types::AttributeValue {
+    use aws_sdk_dynamodb::types::AttributeValue;
+
+    match v {
+        Value::String(s) => AttributeValue::S(s.clone()),
+        // JSON numbers map to DynamoDB's numeric type (stored as decimal strings).
+        Value::Number(n) => AttributeValue::N(n.to_string()),
+        Value::Bool(b) => AttributeValue::Bool(*b),
+        Value::Null => AttributeValue::Null(true),
+        Value::Array(arr) => AttributeValue::L(arr.iter().map(json_to_attribute_value).collect()),
+        Value::Object(obj) => {
+            let mut map = std::collections::HashMap::new();
+            for (k, val) in obj.iter() {
+                map.insert(k.clone(), json_to_attribute_value(val));
+            }
+            AttributeValue::M(map)
+        }
+    }
+}
+
 /// Maps DynamoDB attribute types to human-readable type names.
 pub fn attribute_type_name(attr_type: &str) -> &'static str {
     match attr_type {

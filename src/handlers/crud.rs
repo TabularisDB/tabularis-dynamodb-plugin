@@ -1,8 +1,18 @@
 //! CRUD handlers: insert, update, delete records.
+//!
+//! All writes go through the native DynamoDB item APIs (PutItem, UpdateItem,
+//! DeleteItem) rather than PartiQL. This avoids the 8KB `ExecuteStatement`
+//! limit, correctly preserves typed values (numbers stay numbers, nested
+//! maps/lists round-trip), and lets us validate key columns up front so
+//! callers get a clear error instead of an opaque service failure.
 
+use std::collections::HashMap;
+
+use aws_sdk_dynamodb::types::AttributeValue;
 use serde_json::{json, Value};
 
 use crate::dynamodb::client::Client;
+use crate::dynamodb::models::json_to_attribute_value;
 use crate::error::ErrorCode;
 use crate::rpc::{error_response, ok_response};
 
@@ -55,6 +65,7 @@ async fn build_client(params: &Value) -> Result<Client, Value> {
     })
 }
 
+/// Insert a record via the native PutItem API.
 pub async fn insert_record(id: Value, params: &Value) -> Value {
     let table = params.get("table").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -66,38 +77,22 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    let data = params.get("data").and_then(|d| d.as_object()).map(|obj| {
-        // Convert JSON data map to a PartiQL-compatible INSERT statement
-        let cols: Vec<String> = obj.keys().cloned().collect();
-        let vals: Vec<String> = obj
-            .values()
-            .map(|v| match v {
-                Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Null => "NULL".to_string(),
-                _ => format!("'{}'", v.to_string().replace('\'', "''")),
-            })
-            .collect();
-
-        format!(
-            "INSERT INTO \"{}\" VALUE {{ {} }}",
-            table,
-            cols.iter()
-                .zip(vals.iter())
-                .map(|(c, v)| format!("'{}': {}", c, v))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    });
-
-    let Some(statement) = data else {
-        return error_response(
-            id,
-            ErrorCode::InvalidParams,
-            "data must be a non-empty object",
-        );
+    let data = match params.get("data").and_then(|d| d.as_object()) {
+        Some(obj) if !obj.is_empty() => obj,
+        _ => {
+            return error_response(
+                id,
+                ErrorCode::InvalidParams,
+                "data must be a non-empty object",
+            );
+        }
     };
+
+    // Build the item map with correct DynamoDB types (numbers, nested maps/lists).
+    let mut item: HashMap<String, AttributeValue> = HashMap::new();
+    for (k, v) in data.iter() {
+        item.insert(k.clone(), json_to_attribute_value(v));
+    }
 
     let client = match build_client(params).await {
         Ok(c) => c,
@@ -110,8 +105,8 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         }
     };
 
-    match client.execute_statement(&statement).await {
-        Ok(_) => ok_response(id, json!({"affected_rows": 1})),
+    match client.put_item(table, item).await {
+        Ok(()) => ok_response(id, json!({"affected_rows": 1})),
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
     }
 }
@@ -145,15 +140,6 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    // Build PartiQL UPDATE statement
-    let new_val_str = value_to_partiql_literal(new_val.unwrap());
-    let where_clause = build_where_clause(&key_conditions);
-
-    let statement = format!(
-        "UPDATE \"{}\" SET \"{}\" = {} WHERE {}",
-        table, col_name, new_val_str, where_clause
-    );
-
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
@@ -165,8 +151,28 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         }
     };
 
-    match client.execute_statement(&statement).await {
-        Ok(_) => ok_response(id, json!({"affected_rows": 1})),
+    // Validate that the supplied key columns are actual table key attributes.
+    match client.table_key_columns(table).await {
+        Ok(valid_keys) => {
+            if let Some(msg) = validate_key_columns(&key_conditions, &valid_keys) {
+                return error_response(id, ErrorCode::InvalidParams, &msg);
+            }
+            if let Some(msg) = ensure_full_key(&key_conditions, &valid_keys) {
+                return error_response(id, ErrorCode::InvalidParams, &msg);
+            }
+        }
+        Err(err) => return error_response(id, ErrorCode::InternalError, &err.message),
+    }
+
+    let key = key_conditions
+        .iter()
+        .map(|(k, v)| (k.clone(), json_to_attribute_value(v)))
+        .collect();
+
+    let new_val_attr = json_to_attribute_value(new_val.unwrap());
+
+    match client.update_item(table, key, col_name, new_val_attr).await {
+        Ok(()) => ok_response(id, json!({"affected_rows": 1})),
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
     }
 }
@@ -193,10 +199,6 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    let where_clause = build_where_clause(&key_conditions);
-
-    let statement = format!("DELETE FROM \"{}\" WHERE {}", table, where_clause);
-
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => {
@@ -208,8 +210,26 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         }
     };
 
-    match client.execute_statement(&statement).await {
-        Ok(_) => ok_response(id, json!({"affected_rows": 1})),
+    // Validate that the supplied key columns are actual table key attributes.
+    match client.table_key_columns(table).await {
+        Ok(valid_keys) => {
+            if let Some(msg) = validate_key_columns(&key_conditions, &valid_keys) {
+                return error_response(id, ErrorCode::InvalidParams, &msg);
+            }
+            if let Some(msg) = ensure_full_key(&key_conditions, &valid_keys) {
+                return error_response(id, ErrorCode::InvalidParams, &msg);
+            }
+        }
+        Err(err) => return error_response(id, ErrorCode::InternalError, &err.message),
+    }
+
+    let key = key_conditions
+        .iter()
+        .map(|(k, v)| (k.clone(), json_to_attribute_value(v)))
+        .collect();
+
+    match client.delete_item(table, key).await {
+        Ok(()) => ok_response(id, json!({"affected_rows": 1})),
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
     }
 }
@@ -241,33 +261,39 @@ fn extract_key_conditions(params: &Value) -> Vec<(String, Value)> {
     Vec::new()
 }
 
-/// Build a WHERE clause from key conditions: `"col1" = val1 AND "col2" = val2`
-fn build_where_clause(conditions: &[(String, Value)]) -> String {
-    conditions
-        .iter()
-        .map(|(col, val)| format!("\"{}\" = {}", col, value_to_partiql_literal(val)))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+/// Return an error message if any supplied key column is not a real key
+/// attribute on the table; otherwise `None`.
+fn validate_key_columns(
+    key_conditions: &[(String, Value)],
+    valid_keys: &[String],
+) -> Option<String> {
+    for (col, _) in key_conditions {
+        if !valid_keys.iter().any(|k| k == col) {
+            return Some(format!(
+                "column '{col}' is not a key attribute of this table (valid key columns: {})",
+                valid_keys.join(", ")
+            ));
+        }
+    }
+    None
 }
 
-/// Convert a JSON value to a PartiQL literal string.
-fn value_to_partiql_literal(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "NULL".to_string(),
-        Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(value_to_partiql_literal).collect();
-            format!("[{}]", items.join(", "))
-        }
-        Value::Object(obj) => {
-            let entries: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, value_to_partiql_literal(v)))
-                .collect();
-            format!("{{{}}}", entries.join(", "))
-        }
+/// Return an error message if the supplied key does not cover all of the
+/// table's key attributes (HASH + RANGE); otherwise `None`. DynamoDB's
+/// item APIs require the full key to address an item.
+fn ensure_full_key(key_conditions: &[(String, Value)], valid_keys: &[String]) -> Option<String> {
+    let missing: Vec<String> = valid_keys
+        .iter()
+        .filter(|k| !key_conditions.iter().any(|(col, _)| col == *k))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "key is missing required key attribute(s): {} (must provide all key columns)",
+            missing.join(", ")
+        ))
     }
 }
 
@@ -281,6 +307,17 @@ mod tests {
         let params = json!({"params": {}, "table": "", "data": {}});
         let result = insert_record(json!(1), &params).await;
         assert!(result.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn insert_record_with_missing_data_returns_error() {
+        let params = json!({"params": {}, "table": "users"});
+        let result = insert_record(json!(1), &params).await;
+        assert!(result.get("error").is_some());
+        assert_eq!(
+            result["error"]["message"],
+            "data must be a non-empty object"
+        );
     }
 
     #[tokio::test]
@@ -298,39 +335,58 @@ mod tests {
     }
 
     #[test]
-    fn value_to_partiql_literal_string() {
-        assert_eq!(value_to_partiql_literal(&json!("hello")), "'hello'");
+    fn validate_key_columns_accepts_valid() {
+        let valid = vec!["id".to_string(), "created_at".to_string()];
+        let conds = vec![
+            ("id".to_string(), json!("a")),
+            ("created_at".to_string(), json!("b")),
+        ];
+        assert!(validate_key_columns(&conds, &valid).is_none());
     }
 
     #[test]
-    fn value_to_partiql_literal_string_with_quote() {
-        assert_eq!(value_to_partiql_literal(&json!("it's")), "'it''s'");
+    fn validate_key_columns_rejects_non_key() {
+        let valid = vec!["id".to_string()];
+        let conds = vec![("email".to_string(), json!("x@y.z"))];
+        let msg = validate_key_columns(&conds, &valid).unwrap();
+        assert!(msg.contains("email"));
+        assert!(msg.contains("not a key attribute"));
     }
 
     #[test]
-    fn value_to_partiql_literal_number() {
-        assert_eq!(value_to_partiql_literal(&json!(42)), "42");
-        assert_eq!(value_to_partiql_literal(&json!(2.71)), "2.71");
+    fn ensure_full_key_detects_missing_sort_key() {
+        let valid = vec!["id".to_string(), "created_at".to_string()];
+        let conds = vec![("id".to_string(), json!("a"))];
+        let msg = ensure_full_key(&conds, &valid).unwrap();
+        assert!(msg.contains("created_at"));
     }
 
     #[test]
-    fn value_to_partiql_literal_bool() {
-        assert_eq!(value_to_partiql_literal(&json!(true)), "true");
-        assert_eq!(value_to_partiql_literal(&json!(false)), "false");
+    fn ensure_full_key_ok_when_complete() {
+        let valid = vec!["id".to_string(), "created_at".to_string()];
+        let conds = vec![
+            ("id".to_string(), json!("a")),
+            ("created_at".to_string(), json!("b")),
+        ];
+        assert!(ensure_full_key(&conds, &valid).is_none());
     }
 
     #[test]
-    fn value_to_partiql_literal_null() {
-        assert_eq!(value_to_partiql_literal(&Value::Null), "NULL");
+    fn extract_key_conditions_prefers_key_object() {
+        let params = json!({
+            "key": {"id": "a", "created_at": "b"},
+            "pk_col": "id",
+            "pk_val": "ignored"
+        });
+        let conds = extract_key_conditions(&params);
+        assert_eq!(conds.len(), 2);
     }
 
     #[test]
-    fn value_to_partiql_literal_object() {
-        let v = json!({"name": "Alice", "age": 30});
-        let result = value_to_partiql_literal(&v);
-        assert!(result.contains("\"name\""));
-        assert!(result.contains("\"age\""));
-        assert!(result.contains("'Alice'"));
-        assert!(result.contains("30"));
+    fn extract_key_conditions_falls_back_to_pk() {
+        let params = json!({"pk_col": "id", "pk_val": "a"});
+        let conds = extract_key_conditions(&params);
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "id");
     }
 }
