@@ -99,11 +99,17 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     match query.mode {
         QueryMode::Partiql => match client.execute_statement(&query.body).await {
             Ok(result) => {
-                let columns = result
-                    .items
-                    .first()
-                    .map(|item| item.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                // Union of all keys across all items (DynamoDB is schemaless —
+                // each item can have different attributes). Preserves insertion order.
+                let mut columns: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for item in &result.items {
+                    for key in item.keys() {
+                        if seen.insert(key.clone()) {
+                            columns.push(key.clone());
+                        }
+                    }
+                }
 
                 let rows: Vec<Vec<Value>> = result
                     .items
@@ -139,11 +145,17 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             // Full implementation will parse the YAML-like body and call the appropriate SDK methods
             match client.execute_statement(&query.body).await {
                 Ok(result) => {
-                    let columns = result
-                        .items
-                        .first()
-                        .map(|item| item.keys().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
+                    // Union of all keys across all items (DynamoDB is schemaless —
+                    // each item can have different attributes). Preserves insertion order.
+                    let mut columns: Vec<String> = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    for item in &result.items {
+                        for key in item.keys() {
+                            if seen.insert(key.clone()) {
+                                columns.push(key.clone());
+                            }
+                        }
+                    }
 
                     let rows: Vec<Vec<Value>> = result
                         .items
