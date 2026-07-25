@@ -245,6 +245,74 @@ impl Client {
 
         Ok(ExecuteStatementOutput::from_sdk(response))
     }
+
+    /// Return the set of key attribute names for a table (HASH + RANGE).
+    /// Used to validate that a caller-supplied `key` object only contains
+    /// real key columns before building a PartiQL WHERE clause.
+    pub async fn table_key_columns(&self, table_name: &str) -> Result<Vec<String>, PluginError> {
+        let desc = self.describe_table(table_name).await?;
+        Ok(desc
+            .columns
+            .iter()
+            .filter(|c| c.is_pk || c.is_sort_key)
+            .map(|c| c.name.clone())
+            .collect())
+    }
+
+    /// Insert a full item via the native PutItem API (no 8KB statement limit,
+    /// supports nested maps/lists and binary values).
+    pub async fn put_item(
+        &self,
+        table_name: &str,
+        item: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+    ) -> Result<(), PluginError> {
+        self.inner
+            .put_item()
+            .table_name(table_name)
+            .set_item(Some(item))
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("PutItem failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Update a single attribute on an item identified by its key, via the
+    /// native UpdateItem API (avoids PartiQL escaping/size limits).
+    pub async fn update_item(
+        &self,
+        table_name: &str,
+        key: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+        col_name: &str,
+        new_val: aws_sdk_dynamodb::types::AttributeValue,
+    ) -> Result<(), PluginError> {
+        self.inner
+            .update_item()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .update_expression("SET #attr = :val")
+            .expression_attribute_names("#attr".to_string(), col_name.to_string())
+            .expression_attribute_values(":val".to_string(), new_val)
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("UpdateItem failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Delete an item identified by its key via the native DeleteItem API.
+    pub async fn delete_item(
+        &self,
+        table_name: &str,
+        key: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+    ) -> Result<(), PluginError> {
+        self.inner
+            .delete_item()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("DeleteItem failed: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
