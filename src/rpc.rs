@@ -33,7 +33,10 @@ pub async fn handle_line(line: &str) -> Value {
         // Metadata
         "get_tables" => handlers::metadata::get_tables(id, &params).await,
         "get_columns" => handlers::metadata::get_columns(id, &params).await,
-        "get_databases" => ok_response(id, json!([{"name": "default"}])),
+        // DynamoDB has no database/schema concept — tables are the top-level
+        // namespace. Return an empty list rather than a fabricated "default"
+        // entry so clients don't try to switch to a nonexistent database (#25).
+        "get_databases" => ok_response(id, json!([])),
         "get_schemas" => ok_response(id, json!([])),
         "get_routines" => ok_response(id, json!([])),
         "get_views" => ok_response(id, json!([])),
@@ -125,10 +128,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_get_databases_returns_default() {
+    async fn handle_get_databases_returns_empty() {
         let line = r#"{"jsonrpc":"2.0","method":"get_databases","id":1}"#;
         let response = handle_line(line).await;
-        assert_eq!(response["result"], json!([{"name": "default"}]));
+        assert_eq!(response["result"], json!([]));
     }
 
     #[tokio::test]
