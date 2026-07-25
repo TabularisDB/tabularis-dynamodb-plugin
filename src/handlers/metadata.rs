@@ -2,72 +2,17 @@
 
 use serde_json::{json, Value};
 
-use crate::dynamodb::client::Client;
 use crate::error::ErrorCode;
+use crate::handlers::connection;
 use crate::handlers::models::ColumnResponse;
 use crate::rpc::{error_response, ok_response};
 use crate::utils::extractor;
 
-/// Build a DynamoDB client from params (shared helper).
-async fn build_client(params: &Value) -> Result<Client, Value> {
-    let region = params
-        .get("params")
-        .and_then(|p| p.get("region"))
-        .and_then(|r| r.as_str());
-
-    let access_key_id = params
-        .get("params")
-        .and_then(|p| p.get("access_key_id"))
-        .and_then(|r| r.as_str());
-
-    let secret_access_key = params
-        .get("params")
-        .and_then(|p| p.get("secret_access_key"))
-        .and_then(|r| r.as_str());
-
-    let session_token = params
-        .get("params")
-        .and_then(|p| p.get("session_token"))
-        .and_then(|r| r.as_str());
-
-    let profile = params
-        .get("params")
-        .and_then(|p| p.get("profile"))
-        .and_then(|r| r.as_str());
-
-    let endpoint = params
-        .get("params")
-        .and_then(|p| p.get("endpoint"))
-        .and_then(|r| r.as_str());
-
-    Client::new(
-        region,
-        access_key_id,
-        secret_access_key,
-        session_token,
-        profile,
-        endpoint,
-    )
-    .await
-    .map_err(|e| {
-        json!({
-            "code": ErrorCode::InternalError.value(),
-            "message": e.to_string()
-        })
-    })
-}
-
 /// Returns the list of tables in DynamoDB.
 pub async fn get_tables(id: Value, params: &Value) -> Value {
-    let client = match build_client(params).await {
+    let client = match connection::build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     match client.list_tables().await {
@@ -101,15 +46,9 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
         }
     };
 
-    let client = match build_client(params).await {
+    let client = match connection::build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     match client.describe_table(&table_name).await {
@@ -147,15 +86,9 @@ pub async fn get_indexes(id: Value, params: &Value) -> Value {
         }
     };
 
-    let client = match build_client(params).await {
+    let client = match connection::build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     match client.describe_table(&table_name).await {
@@ -190,11 +123,14 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn get_tables_with_missing_params_returns_error_or_empty() {
+    async fn get_tables_with_missing_params_returns_error() {
         let params = json!({"params": {}});
         let result = get_tables(json!(1), &params).await;
-        // Should not panic — will try to connect and fail gracefully or return empty
-        assert!(result.get("error").is_some() || result.get("result").is_some());
+        assert!(result.get("error").is_some());
+        assert!(result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection params required"));
     }
 
     #[tokio::test]
