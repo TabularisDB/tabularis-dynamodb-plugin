@@ -51,7 +51,6 @@ pub struct ExecuteStatementOutput {
     pub items: Vec<HashMap<String, Value>>,
     pub next_token: Option<String>,
 }
-
 impl ExecuteStatementOutput {
     pub fn from_sdk(
         response: aws_sdk_dynamodb::operation::execute_statement::ExecuteStatementOutput,
@@ -73,6 +72,69 @@ impl ExecuteStatementOutput {
 
         Self { items, next_token }
     }
+}
+
+/// Generic output of a native SDK read operation (Scan / Query / GetItem),
+/// using an opaque, base64-encoded pagination token derived from
+/// `LastEvaluatedKey` so callers can resume reads.
+#[derive(Debug, Clone)]
+pub struct ItemOutput {
+    pub items: Vec<HashMap<String, Value>>,
+    pub next_token: Option<String>,
+}
+
+impl ItemOutput {
+    pub fn new(
+        raw_items: &[HashMap<String, aws_sdk_dynamodb::types::AttributeValue>],
+        last_key: Option<&HashMap<String, aws_sdk_dynamodb::types::AttributeValue>>,
+    ) -> Self {
+        let items = raw_items
+            .iter()
+            .map(|item| {
+                let mut map = HashMap::new();
+                for (k, v) in item.iter() {
+                    map.insert(k.clone(), attribute_value_to_json(v));
+                }
+                map
+            })
+            .collect();
+
+        let next_token = last_key.and_then(encode_last_key);
+
+        Self { items, next_token }
+    }
+}
+
+use base64::Engine as _;
+
+/// Encode a DynamoDB `LastEvaluatedKey` into an opaque base64 token.
+fn encode_last_key(
+    key: &HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+) -> Option<String> {
+    // Serialize to a plain JSON map of {attr: json-value}, then base64 it.
+    let mut obj = serde_json::Map::new();
+    for (k, v) in key.iter() {
+        obj.insert(k.clone(), attribute_value_to_json(v));
+    }
+    let json = serde_json::Value::Object(obj);
+    let raw = serde_json::to_vec(&json).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(raw))
+}
+
+/// Decode an opaque base64 token back into a DynamoDB key map (AttributeValue form).
+pub fn decode_pagination_token(
+    token: &str,
+) -> Option<HashMap<String, aws_sdk_dynamodb::types::AttributeValue>> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(token.trim())
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let obj = value.as_object()?;
+    let mut key = HashMap::new();
+    for (k, v) in obj.iter() {
+        key.insert(k.clone(), json_to_attribute_value(v));
+    }
+    Some(key)
 }
 
 /// Convert an SDK AttributeValue to a serde_json Value.
