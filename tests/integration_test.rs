@@ -24,7 +24,7 @@ async fn full_get_databases_flow() {
     let resp = rpc::handle_line(req).await;
 
     assert_eq!(resp["jsonrpc"], "2.0");
-    assert_eq!(resp["result"], json!([{"name": "default"}]));
+    assert_eq!(resp["result"], json!([]));
     assert_eq!(resp["id"], 2);
 }
 

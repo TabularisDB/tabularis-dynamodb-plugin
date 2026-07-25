@@ -11,58 +11,14 @@ use std::collections::HashMap;
 use aws_sdk_dynamodb::types::AttributeValue;
 use serde_json::{json, Value};
 
-use crate::dynamodb::client::Client;
 use crate::dynamodb::models::json_to_attribute_value;
-use crate::error::ErrorCode;
+use crate::error::{ErrorCode, PluginError};
+use crate::handlers::connection;
 use crate::rpc::{error_response, ok_response};
 
-/// Build a DynamoDB client from params.
-async fn build_client(params: &Value) -> Result<Client, Value> {
-    let region = params
-        .get("params")
-        .and_then(|p| p.get("region"))
-        .and_then(|r| r.as_str());
-
-    let access_key_id = params
-        .get("params")
-        .and_then(|p| p.get("access_key_id"))
-        .and_then(|r| r.as_str());
-
-    let secret_access_key = params
-        .get("params")
-        .and_then(|p| p.get("secret_access_key"))
-        .and_then(|r| r.as_str());
-
-    let session_token = params
-        .get("params")
-        .and_then(|p| p.get("session_token"))
-        .and_then(|r| r.as_str());
-
-    let profile = params
-        .get("params")
-        .and_then(|p| p.get("profile"))
-        .and_then(|r| r.as_str());
-
-    let endpoint = params
-        .get("params")
-        .and_then(|p| p.get("endpoint"))
-        .and_then(|r| r.as_str());
-
-    Client::new(
-        region,
-        access_key_id,
-        secret_access_key,
-        session_token,
-        profile,
-        endpoint,
-    )
-    .await
-    .map_err(|e| {
-        json!({
-            "code": ErrorCode::InternalError.value(),
-            "message": e.to_string()
-        })
-    })
+/// Build a DynamoDB client from params, validating connection config (#29).
+async fn build_client(params: &Value) -> Result<crate::dynamodb::client::Client, PluginError> {
+    connection::build_client(params).await
 }
 
 /// Insert a record via the native PutItem API.
@@ -96,13 +52,7 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
 
     let client = match build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     match client.put_item(table, item).await {
@@ -142,13 +92,7 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
 
     let client = match build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     // Validate that the supplied key columns are actual table key attributes.
@@ -201,13 +145,7 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
 
     let client = match build_client(params).await {
         Ok(c) => c,
-        Err(err) => {
-            return error_response(
-                id,
-                ErrorCode::InternalError,
-                err["message"].as_str().unwrap_or("unknown error"),
-            );
-        }
+        Err(err) => return error_response(id, err.code, &err.message),
     };
 
     // Validate that the supplied key columns are actual table key attributes.
