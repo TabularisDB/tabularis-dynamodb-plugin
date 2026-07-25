@@ -6,6 +6,15 @@ use crate::error::ErrorCode;
 use crate::rpc::{error_response, ok_response};
 
 /// Generate a PartiQL CREATE TABLE statement.
+///
+/// Builds the statement from optional `columns` and `key_schema` params:
+///   - `columns`: array of `{name, type}` objects (type is a DynamoDB type code
+///     or a SQL type name).
+///   - `key_schema`: `{partition_key, sort_key}` (sort_key optional).
+///
+/// When no columns are supplied, falls back to a single `id STRING` primary key
+/// (backward-compatible with the original stub). Composite HASH + RANGE keys are
+/// emitted as `PRIMARY KEY (pk, sk)`.
 pub async fn get_create_table_sql(id: Value, params: &Value) -> Value {
     let table_name = params
         .get("table_name")
@@ -20,14 +29,95 @@ pub async fn get_create_table_sql(id: Value, params: &Value) -> Value {
         );
     }
 
-    // Generate a basic CREATE TABLE statement
-    // The full implementation would inspect columns and key schema from params
-    let sql = format!(
-        "CREATE TABLE \"{}\" (id STRING, PRIMARY KEY (id))",
-        table_name
-    );
+    let columns = params
+        .get("columns")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let name = v.get("name").and_then(|n| n.as_str())?;
+                    let raw_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("STRING");
+                    Some((name.to_string(), dynamodb_type_to_sql(raw_type)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let partition_key = params
+        .get("key_schema")
+        .and_then(|k| k.get("partition_key"))
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string());
+
+    let sort_key = params
+        .get("key_schema")
+        .and_then(|k| k.get("sort_key"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    let sql = if columns.is_empty() && partition_key.is_none() {
+        // Backward-compatible default when no schema information is provided.
+        format!(
+            "CREATE TABLE \"{}\" (id STRING, PRIMARY KEY (id))",
+            table_name
+        )
+    } else {
+        let mut col_defs: Vec<String> = Vec::new();
+        let mut key_cols: Vec<String> = Vec::new();
+
+        if let Some(pk) = &partition_key {
+            let pk_type = columns
+                .iter()
+                .find(|(n, _)| n == pk)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| "STRING".to_string());
+            col_defs.push(format!("\"{}\" {}", pk, pk_type));
+            key_cols.push(format!("\"{}\"", pk));
+        }
+        if let Some(sk) = &sort_key {
+            let sk_type = columns
+                .iter()
+                .find(|(n, _)| n == sk)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| "STRING".to_string());
+            col_defs.push(format!("\"{}\" {}", sk, sk_type));
+            key_cols.push(format!("\"{}\"", sk));
+        }
+        for (name, sql_type) in &columns {
+            if Some(name) == partition_key.as_ref() || Some(name) == sort_key.as_ref() {
+                continue;
+            }
+            col_defs.push(format!("\"{}\" {}", name, sql_type));
+        }
+
+        let pk = if key_cols.is_empty() {
+            "PRIMARY KEY (\"id\")".to_string()
+        } else {
+            format!("PRIMARY KEY ({})", key_cols.join(", "))
+        };
+
+        format!(
+            "CREATE TABLE \"{}\" ({}, {})",
+            table_name,
+            col_defs.join(", "),
+            pk
+        )
+    };
 
     ok_response(id, json!([sql]))
+}
+
+/// Map a DynamoDB attribute type code to a PartiQL/SQL column type.
+/// SQL type names (already uppercase keywords) are passed through unchanged.
+fn dynamodb_type_to_sql(raw: &str) -> String {
+    match raw.to_uppercase().as_str() {
+        "S" | "STRING" => "STRING".to_string(),
+        "N" | "NUMBER" => "NUMBER".to_string(),
+        "B" | "BINARY" => "BINARY".to_string(),
+        "BOOL" | "BOOLEAN" => "BOOLEAN".to_string(),
+        "L" | "M" | "JSON" => "JSON".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Generate a PartiQL ALTER TABLE ADD COLUMN statement.
@@ -188,6 +278,68 @@ mod tests {
         let statements = result["result"].as_array().unwrap();
         assert!(statements[0].as_str().unwrap().contains("CREATE TABLE"));
         assert!(statements[0].as_str().unwrap().contains("users"));
+    }
+
+    #[tokio::test]
+    async fn get_create_table_sql_uses_key_schema_and_columns() {
+        let params = json!({
+            "params": {},
+            "table_name": "orders",
+            "columns": [
+                {"name": "id", "type": "S"},
+                {"name": "created_at", "type": "S"},
+                {"name": "total", "type": "N"},
+                {"name": "meta", "type": "M"}
+            ],
+            "key_schema": {"partition_key": "id", "sort_key": "created_at"}
+        });
+        let result = get_create_table_sql(json!(1), &params).await;
+        let sql = result["result"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Composite key in PRIMARY KEY clause
+        assert!(
+            sql.contains("PRIMARY KEY (\"id\", \"created_at\")"),
+            "sql was: {sql}"
+        );
+        // Key columns typed from columns list
+        assert!(sql.contains("\"id\" STRING"), "sql was: {sql}");
+        assert!(sql.contains("\"created_at\" STRING"), "sql was: {sql}");
+        // Non-key columns typed from DynamoDB codes
+        assert!(sql.contains("\"total\" NUMBER"), "sql was: {sql}");
+        assert!(sql.contains("\"meta\" JSON"), "sql was: {sql}");
+    }
+
+    #[tokio::test]
+    async fn get_create_table_sql_partition_key_only() {
+        let params = json!({
+            "params": {},
+            "table_name": "users",
+            "columns": [{"name": "email", "type": "S"}],
+            "key_schema": {"partition_key": "email"}
+        });
+        let result = get_create_table_sql(json!(1), &params).await;
+        let sql = result["result"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(sql.contains("PRIMARY KEY (\"email\")"), "sql was: {sql}");
+        assert!(sql.contains("\"email\" STRING"), "sql was: {sql}");
+    }
+
+    #[tokio::test]
+    async fn get_create_table_sql_falls_back_to_default_without_schema() {
+        let params = json!({"params": {}, "table_name": "legacy"});
+        let result = get_create_table_sql(json!(1), &params).await;
+        let sql = result["result"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            sql, "CREATE TABLE \"legacy\" (id STRING, PRIMARY KEY (id))",
+            "backward-compatible stub changed"
+        );
     }
 
     #[tokio::test]
