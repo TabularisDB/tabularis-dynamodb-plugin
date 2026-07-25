@@ -4,6 +4,19 @@ use crate::dynamodb::models::{ColumnInfo, DescribeTableOutput, ExecuteStatementO
 use crate::dynamodb::pool;
 use crate::error::PluginError;
 
+/// Arguments for a native DynamoDB Query (single partition-key lookup).
+#[derive(Debug, Clone)]
+pub struct QueryArgs {
+    pub table_name: String,
+    pub pk_name: String,
+    pub pk_val: aws_sdk_dynamodb::types::AttributeValue,
+    pub sk_name: Option<String>,
+    pub sk_val: Option<aws_sdk_dynamodb::types::AttributeValue>,
+    pub limit: Option<i32>,
+    pub exclusive_start_key:
+        Option<std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>>,
+}
+
 /// Wraps an AWS DynamoDB SDK client with convenience methods.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -312,6 +325,95 @@ impl Client {
             .await
             .map_err(|e| PluginError::internal(format!("DeleteItem failed: {e}")))?;
         Ok(())
+    }
+
+    /// Full table Scan via the native Scan API (supports limit + pagination).
+    pub async fn scan(
+        &self,
+        table_name: &str,
+        limit: Option<i32>,
+        exclusive_start_key: Option<
+            std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+        >,
+    ) -> Result<crate::dynamodb::models::ItemOutput, PluginError> {
+        let mut req = self.inner.scan().table_name(table_name);
+        if let Some(l) = limit {
+            req = req.limit(l);
+        }
+        if let Some(k) = exclusive_start_key {
+            req = req.set_exclusive_start_key(Some(k));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("Scan failed: {e}")))?;
+        Ok(crate::dynamodb::models::ItemOutput::new(
+            resp.items(),
+            resp.last_evaluated_key(),
+        ))
+    }
+
+    /// Query a single partition key value via the native Query API.
+    /// The HASH key (and optional equality sort-key condition) come from `args`.
+    pub async fn query(
+        &self,
+        args: QueryArgs,
+    ) -> Result<crate::dynamodb::models::ItemOutput, PluginError> {
+        let mut names = std::collections::HashMap::new();
+        let mut values = std::collections::HashMap::new();
+        names.insert("#pk".to_string(), args.pk_name);
+        values.insert(":pkv".to_string(), args.pk_val);
+
+        let key_condition = if let (Some(sk_name), Some(sk_val)) = (args.sk_name, args.sk_val) {
+            names.insert("#sk".to_string(), sk_name);
+            values.insert(":skv".to_string(), sk_val);
+            "#pk = :pkv AND #sk = :skv".to_string()
+        } else {
+            "#pk = :pkv".to_string()
+        };
+
+        let mut req = self
+            .inner
+            .query()
+            .table_name(&args.table_name)
+            .key_condition_expression(key_condition)
+            .set_expression_attribute_names(Some(names))
+            .set_expression_attribute_values(Some(values));
+        if let Some(l) = args.limit {
+            req = req.limit(l);
+        }
+        if let Some(k) = args.exclusive_start_key {
+            req = req.set_exclusive_start_key(Some(k));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("Query failed: {e}")))?;
+        Ok(crate::dynamodb::models::ItemOutput::new(
+            resp.items(),
+            resp.last_evaluated_key(),
+        ))
+    }
+
+    /// Fetch a single item by full key via the native GetItem API.
+    pub async fn get_item(
+        &self,
+        table_name: &str,
+        key: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+    ) -> Result<crate::dynamodb::models::ItemOutput, PluginError> {
+        let resp = self
+            .inner
+            .get_item()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("GetItem failed: {e}")))?;
+        let items = match resp.item() {
+            Some(item) => vec![item.clone()],
+            None => vec![],
+        };
+        Ok(crate::dynamodb::models::ItemOutput::new(&items, None))
     }
 }
 
