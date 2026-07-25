@@ -197,8 +197,8 @@ pub fn attribute_type_name(attr_type: &str) -> &'static str {
         "SS" => "STRING_SET",
         "NS" => "NUMBER_SET",
         "BS" => "BINARY_SET",
-        "L" => "LIST",
-        "M" => "MAP",
+        "L" => "JSON",
+        "M" => "JSON",
         "NULL" => "NULL",
         _ => "STRING",
     }
@@ -217,8 +217,8 @@ mod tests {
         assert_eq!(attribute_type_name("SS"), "STRING_SET");
         assert_eq!(attribute_type_name("NS"), "NUMBER_SET");
         assert_eq!(attribute_type_name("BS"), "BINARY_SET");
-        assert_eq!(attribute_type_name("L"), "LIST");
-        assert_eq!(attribute_type_name("M"), "MAP");
+        assert_eq!(attribute_type_name("L"), "JSON");
+        assert_eq!(attribute_type_name("M"), "JSON");
         assert_eq!(attribute_type_name("NULL"), "NULL");
     }
 
