@@ -272,20 +272,48 @@ impl Client {
             .collect())
     }
 
+    /// Return the partition-key (HASH) column name for a table, used to build
+    /// the default idempotent-insert condition `attribute_not_exists(pk)`.
+    pub async fn table_partition_key(&self, table_name: &str) -> Result<String, PluginError> {
+        let desc = self.describe_table(table_name).await?;
+        desc.columns
+            .iter()
+            .find(|c| c.is_pk)
+            .map(|c| c.name.clone())
+            .ok_or_else(|| {
+                PluginError::internal(format!(
+                    "could not determine partition key for {table_name}"
+                ))
+            })
+    }
+
     /// Insert a full item via the native PutItem API (no 8KB statement limit,
     /// supports nested maps/lists and binary values).
     pub async fn put_item(
         &self,
         table_name: &str,
         item: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
+        condition_expression: Option<String>,
     ) -> Result<(), PluginError> {
-        self.inner
+        let mut request = self
+            .inner
             .put_item()
             .table_name(table_name)
-            .set_item(Some(item))
-            .send()
-            .await
-            .map_err(|e| PluginError::internal(format!("PutItem failed: {e}")))?;
+            .set_item(Some(item));
+        if let Some(cond) = condition_expression {
+            request = request.condition_expression(cond);
+        }
+        request.send().await.map_err(|e| {
+            let svc_err = e.into_service_error();
+            if svc_err.is_conditional_check_failed_exception() {
+                PluginError::internal(
+                    "ConditionalCheckFailed: the item already exists (insert condition not met)"
+                        .to_string(),
+                )
+            } else {
+                PluginError::internal(format!("PutItem failed: {svc_err}"))
+            }
+        })?;
         Ok(())
     }
 

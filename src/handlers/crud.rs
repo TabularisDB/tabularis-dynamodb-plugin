@@ -50,14 +50,57 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         item.insert(k.clone(), json_to_attribute_value(v));
     }
 
+    // Optional condition expression for conditional / idempotent inserts (#11).
+    // An explicit `condition_expression` takes precedence. When `idempotent` is
+    // true and no condition is supplied, we default to `attribute_not_exists(pk)`
+    // so an existing item is never silently overwritten.
+    let condition_expression = params
+        .get("condition_expression")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    let idempotent = params
+        .get("idempotent")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+
     let client = match build_client(params).await {
         Ok(c) => c,
         Err(err) => return error_response(id, err.code, &err.message),
     };
 
-    match client.put_item(table, item).await {
-        Ok(()) => ok_response(id, json!({"affected_rows": 1})),
-        Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+    // Resolve the default idempotent condition (needs the real partition key).
+    let pk_lookup = if condition_expression.is_none() && idempotent {
+        match client.table_partition_key(table).await {
+            Ok(pk) => Some(Ok(pk)),
+            Err(err) => Some(Err(err.message)),
+        }
+    } else {
+        None
+    };
+    match resolve_insert_condition(condition_expression.as_deref(), idempotent, pk_lookup) {
+        Ok(condition) => match client.put_item(table, item, condition).await {
+            Ok(()) => ok_response(id, json!({"affected_rows": 1})),
+            Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+        },
+        Err(msg) => error_response(id, ErrorCode::InternalError, &msg),
+    }
+}
+
+/// Resolve the condition expression for an insert (#11).
+///
+/// Precedence: an explicit `condition_expression` always wins. Otherwise, when
+/// `idempotent` is set, build `attribute_not_exists(pk)` from the table's
+/// partition key. Without either, no condition is applied.
+fn resolve_insert_condition(
+    explicit: Option<&str>,
+    idempotent: bool,
+    pk_lookup: Option<Result<String, String>>,
+) -> Result<Option<String>, String> {
+    match (explicit, idempotent, pk_lookup) {
+        (Some(c), _, _) => Ok(Some(c.to_string())),
+        (None, true, Some(Ok(pk))) => Ok(Some(format!("attribute_not_exists({pk})"))),
+        (None, true, Some(Err(err))) => Err(err),
+        _ => Ok(None),
     }
 }
 
@@ -326,5 +369,35 @@ mod tests {
         let conds = extract_key_conditions(&params);
         assert_eq!(conds.len(), 1);
         assert_eq!(conds[0].0, "id");
+    }
+
+    #[test]
+    fn resolve_condition_none_when_not_idempotent() {
+        assert_eq!(resolve_insert_condition(None, false, None).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_condition_explicit_wins() {
+        let pk = Some(Ok("id".to_string()));
+        assert_eq!(
+            resolve_insert_condition(Some("attribute_not_exists(x)"), true, pk).unwrap(),
+            Some("attribute_not_exists(x)".to_string()),
+            "explicit condition should take precedence over idempotent default"
+        );
+    }
+
+    #[test]
+    fn resolve_condition_idempotent_builds_attribute_not_exists() {
+        let pk = Some(Ok("id".to_string()));
+        assert_eq!(
+            resolve_insert_condition(None, true, pk).unwrap(),
+            Some("attribute_not_exists(id)".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_condition_idempotent_propagates_pk_error() {
+        let pk = Some(Err("describe failed".to_string()));
+        assert!(resolve_insert_condition(None, true, pk).is_err());
     }
 }
