@@ -195,10 +195,7 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
 
     let where_clause = build_where_clause(&key_conditions);
 
-    let statement = format!(
-        "DELETE FROM \"{}\" WHERE {}",
-        table, where_clause
-    );
+    let statement = format!("DELETE FROM \"{}\" WHERE {}", table, where_clause);
 
     let client = match build_client(params).await {
         Ok(c) => c,
@@ -235,8 +232,10 @@ fn extract_key_conditions(params: &Value) -> Vec<(String, Value)> {
     let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
     let pk_val = params.get("pk_val");
 
-    if !pk_col.is_empty() && pk_val.is_some() {
-        return vec![(pk_col.to_string(), pk_val.unwrap().clone())];
+    if !pk_col.is_empty() {
+        if let Some(val) = pk_val {
+            return vec![(pk_col.to_string(), val.clone())];
+        }
     }
 
     Vec::new()

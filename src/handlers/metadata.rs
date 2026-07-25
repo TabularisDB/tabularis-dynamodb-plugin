@@ -121,7 +121,9 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
                     name: col.name.clone(),
                     data_type: col.data_type.clone(),
                     is_pk: col.is_pk,
-                    is_nullable: false,
+                    // In DynamoDB, only key attributes (HASH + RANGE) are required.
+                    // All non-key attributes are optional/nullable.
+                    is_nullable: !(col.is_pk || col.is_sort_key),
                     is_auto_increment: false,
                 })
                 .collect();
