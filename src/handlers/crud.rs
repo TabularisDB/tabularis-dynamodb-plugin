@@ -127,9 +127,9 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
+    // Support both composite keys (key: {col: val, ...}) and simple keys (pk_col + pk_val)
+    let key_conditions = extract_key_conditions(params);
 
-    let pk_val = params.get("pk_val");
     let col_name = params
         .get("col_name")
         .and_then(|c| c.as_str())
@@ -137,21 +137,21 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
 
     let new_val = params.get("new_val");
 
-    if pk_col.is_empty() || col_name.is_empty() || pk_val.is_none() || new_val.is_none() {
+    if key_conditions.is_empty() || col_name.is_empty() || new_val.is_none() {
         return error_response(
             id,
             ErrorCode::InvalidParams,
-            "pk_col, pk_val, col_name, and new_val are required",
+            "key (or pk_col + pk_val), col_name, and new_val are required",
         );
     }
 
     // Build PartiQL UPDATE statement
-    let pk_val_str = value_to_partiql_literal(pk_val.unwrap());
     let new_val_str = value_to_partiql_literal(new_val.unwrap());
+    let where_clause = build_where_clause(&key_conditions);
 
     let statement = format!(
-        "UPDATE \"{}\" SET \"{}\" = {} WHERE \"{}\" = {}",
-        table, col_name, new_val_str, pk_col, pk_val_str
+        "UPDATE \"{}\" SET \"{}\" = {} WHERE {}",
+        table, col_name, new_val_str, where_clause
     );
 
     let client = match build_client(params).await {
@@ -182,23 +182,22 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
+    // Support both composite keys (key: {col: val, ...}) and simple keys (pk_col + pk_val)
+    let key_conditions = extract_key_conditions(params);
 
-    let pk_val = params.get("pk_val");
-
-    if pk_col.is_empty() || pk_val.is_none() {
+    if key_conditions.is_empty() {
         return error_response(
             id,
             ErrorCode::InvalidParams,
-            "pk_col and pk_val are required",
+            "key (or pk_col + pk_val) is required",
         );
     }
 
-    let pk_val_str = value_to_partiql_literal(pk_val.unwrap());
+    let where_clause = build_where_clause(&key_conditions);
 
     let statement = format!(
-        "DELETE FROM \"{}\" WHERE \"{}\" = {}",
-        table, pk_col, pk_val_str
+        "DELETE FROM \"{}\" WHERE {}",
+        table, where_clause
     );
 
     let client = match build_client(params).await {
@@ -216,6 +215,40 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         Ok(_) => ok_response(id, json!({"affected_rows": 1})),
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
     }
+}
+
+/// Extract key conditions from params. Supports:
+/// - `key`: object mapping column names to values (for composite keys)
+/// - `pk_col` + `pk_val`: simple single-column key (backward compat)
+fn extract_key_conditions(params: &Value) -> Vec<(String, Value)> {
+    // Prefer the `key` object for composite keys
+    if let Some(key_obj) = params.get("key").and_then(|k| k.as_object()) {
+        if !key_obj.is_empty() {
+            return key_obj
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+        }
+    }
+
+    // Fall back to pk_col + pk_val for simple keys
+    let pk_col = params.get("pk_col").and_then(|p| p.as_str()).unwrap_or("");
+    let pk_val = params.get("pk_val");
+
+    if !pk_col.is_empty() && pk_val.is_some() {
+        return vec![(pk_col.to_string(), pk_val.unwrap().clone())];
+    }
+
+    Vec::new()
+}
+
+/// Build a WHERE clause from key conditions: `"col1" = val1 AND "col2" = val2`
+fn build_where_clause(conditions: &[(String, Value)]) -> String {
+    conditions
+        .iter()
+        .map(|(col, val)| format!("\"{}\" = {}", col, value_to_partiql_literal(val)))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// Convert a JSON value to a PartiQL literal string.
