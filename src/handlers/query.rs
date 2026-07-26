@@ -53,6 +53,39 @@ fn extract_limit(params: &Value) -> Option<i32> {
         .and_then(|l| i32::try_from(l).ok())
 }
 
+/// Split a PartiQL body into individual statements on semicolons that sit
+/// outside of single-quoted string literals (#17). Trailing/empty segments are
+/// dropped, so `INSERT ...; UPDATE ...;` yields two statements.
+///
+/// Pure helper so the splitting rules can be unit-tested without a live table.
+fn split_statements(body: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+
+    for c in body.chars() {
+        match c {
+            '\'' => {
+                in_string = !in_string;
+                current.push(c);
+            }
+            ';' if !in_string => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    statements.push(trimmed.to_owned());
+                }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_owned());
+    }
+    statements
+}
+
 /// Classify a PartiQL statement as destructive for the safety guard (#8).
 /// Returns a human-readable reason when the statement is a DROP TABLE or an
 /// unguarded `DELETE FROM <table>` (no WHERE clause).
@@ -259,6 +292,11 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         .get("allow_destructive")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // #17: optional idempotency token for multi-statement transactions.
+    let client_request_token = params
+        .get("client_request_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
 
     let client = match connection::build_client(params).await {
         Ok(c) => c,
@@ -269,6 +307,39 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     match query.mode {
         QueryMode::Partiql => {
+            // #17: multi-statement input routes through ExecuteTransaction.
+            // Pagination (next_token) and LIMIT don't apply to transactions, so
+            // only treat it as a transaction when there are 2+ statements and
+            // no pagination token in play.
+            let statements = split_statements(&query.body);
+            if statements.len() > 1 && next_token.is_none() {
+                // #8: apply the destructive guard to every statement.
+                if !allow_destructive {
+                    for stmt in &statements {
+                        if let Some(warning) = destructive_warning(stmt) {
+                            let mut resp = ExecuteQueryResponse::empty();
+                            resp.warning = Some(warning);
+                            return ok_response(id, json!(resp));
+                        }
+                    }
+                }
+
+                let result = client
+                    .execute_transaction(&statements, client_request_token.as_deref())
+                    .await;
+
+                return match result {
+                    Ok(txn) => {
+                        let mut resp = ExecuteQueryResponse::empty();
+                        resp.affected_rows = txn.affected_rows;
+                        resp.execution_time_ms = started.elapsed().as_millis() as usize;
+                        resp.consumed_capacity = txn.consumed_capacity;
+                        ok_response(id, json!(resp))
+                    }
+                    Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+                };
+            }
+
             // #20: strip an unsupported LIMIT clause and apply it client-side.
             let (statement, inline_limit) = strip_partiql_limit(&query.body);
 
@@ -533,5 +604,43 @@ mod tests {
     fn destructive_guard_allows_select_and_insert() {
         assert!(destructive_warning("SELECT * FROM users").is_none());
         assert!(destructive_warning("INSERT INTO users VALUE {'id': '1'}").is_none());
+    }
+
+    #[test]
+    fn split_statements_single() {
+        assert_eq!(
+            split_statements("SELECT * FROM users"),
+            vec!["SELECT * FROM users".to_string()]
+        );
+        assert!(split_statements("").is_empty());
+        assert!(split_statements("   ;  ").is_empty());
+    }
+
+    #[test]
+    fn split_statements_multi() {
+        let got = split_statements(
+            "INSERT INTO users VALUE {'id': 'u1', 'name': 'Alice'};\n\
+             UPDATE orders SET 'status'='shipped' WHERE 'id'='o1';",
+        );
+        assert_eq!(got.len(), 2);
+        assert!(got[0].starts_with("INSERT INTO users"));
+        assert!(got[1].starts_with("UPDATE orders"));
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolon_in_string() {
+        let got = split_statements("INSERT INTO users VALUE {'id': 'a;b', 'note': 'x;y;z'}");
+        assert_eq!(
+            got.len(),
+            1,
+            "semicolon inside quotes must not split: {got:?}"
+        );
+        assert!(got[0].contains("a;b"));
+    }
+
+    #[test]
+    fn split_statements_drops_trailing_empty() {
+        let got = split_statements("DELETE FROM a WHERE x='1'; DELETE FROM b WHERE y='2';");
+        assert_eq!(got.len(), 2);
     }
 }

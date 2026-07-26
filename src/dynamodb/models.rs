@@ -124,6 +124,39 @@ impl ItemOutput {
     }
 }
 
+/// Output of `execute_transaction` (multi-statement PartiQL, #17).
+///
+/// DynamoDB's `ExecuteTransaction` executes all-or-nothing. It never returns
+/// per-statement result rows (only an acknowledgement per statement), so we
+/// report the combined consumed capacity and the number of statements that ran.
+#[derive(Debug, Clone)]
+pub struct TransactionOutput {
+    /// Number of statements that executed successfully (always equals the
+    /// input count on success, since transactions are all-or-nothing).
+    pub affected_rows: usize,
+    /// Combined read+write capacity consumed across the transaction.
+    pub consumed_capacity: Option<f64>,
+}
+impl TransactionOutput {
+    pub fn from_sdk(
+        response: aws_sdk_dynamodb::operation::execute_transaction::ExecuteTransactionOutput,
+        statement_count: usize,
+    ) -> Self {
+        // `consumed_capacity` on the transaction response is the aggregate list;
+        // sum the per-item capacity units.
+        let consumed_capacity = response
+            .consumed_capacity()
+            .iter()
+            .map(consumed_capacity_units)
+            .reduce(|a, b| a + b);
+
+        Self {
+            affected_rows: statement_count,
+            consumed_capacity,
+        }
+    }
+}
+
 use base64::Engine as _;
 
 /// Encode a DynamoDB `LastEvaluatedKey` into an opaque base64 token.

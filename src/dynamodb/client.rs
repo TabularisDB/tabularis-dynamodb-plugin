@@ -1,6 +1,8 @@
 use aws_sdk_dynamodb::Client as DynamoDbClient;
 
-use crate::dynamodb::models::{ColumnInfo, DescribeTableOutput, ExecuteStatementOutput, IndexInfo};
+use crate::dynamodb::models::{
+    ColumnInfo, DescribeTableOutput, ExecuteStatementOutput, IndexInfo, TransactionOutput,
+};
 use crate::dynamodb::pool;
 use crate::error::PluginError;
 
@@ -267,6 +269,60 @@ impl Client {
             .map_err(|e| PluginError::internal(format!("ExecuteStatement failed: {e}")))?;
 
         Ok(ExecuteStatementOutput::from_sdk(response))
+    }
+
+    /// Execute a multi-statement PartiQL transaction (#17).
+    ///
+    /// All statements run atomically via DynamoDB's `ExecuteTransaction` API —
+    /// either every statement succeeds or none of them are applied. DynamoDB
+    /// limits transactions to 100 statements and 25 unique items touched.
+    ///
+    /// `client_request_token` enables idempotent retries: if the same token is
+    /// resubmitted within 10 minutes, DynamoDB returns the original result
+    /// without re-executing.
+    pub async fn execute_transaction(
+        &self,
+        statements: &[String],
+        client_request_token: Option<&str>,
+    ) -> Result<TransactionOutput, PluginError> {
+        if statements.is_empty() {
+            return Err(PluginError::invalid_params(
+                "execute_transaction requires at least one statement".to_string(),
+            ));
+        }
+        if statements.len() > 100 {
+            return Err(PluginError::invalid_params(format!(
+                "DynamoDB transactions support at most 100 statements, got {}",
+                statements.len()
+            )));
+        }
+
+        let param_statements: Vec<aws_sdk_dynamodb::types::ParameterizedStatement> = statements
+            .iter()
+            .map(|s| {
+                aws_sdk_dynamodb::types::ParameterizedStatement::builder()
+                    .statement(s)
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                PluginError::internal(format!("failed to build transaction statement: {e}"))
+            })?;
+
+        let mut req = self
+            .inner
+            .execute_transaction()
+            .set_transact_statements(Some(param_statements));
+        if let Some(token) = client_request_token {
+            req = req.client_request_token(token);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| PluginError::internal(format!("ExecuteTransaction failed: {e}")))?;
+
+        Ok(TransactionOutput::from_sdk(response, statements.len()))
     }
 
     /// Return the set of key attribute names for a table (HASH + RANGE).
