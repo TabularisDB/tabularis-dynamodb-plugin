@@ -680,6 +680,7 @@ dependencies = [
  "assert-json-diff",
  "aws-config",
  "aws-sdk-dynamodb",
+ "aws-smithy-types",
  "base64",
  "serde",
  "serde_json",
