@@ -21,6 +21,102 @@ fn read_param<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Normalise connection params so that TabularisDB's generic connection form
+/// (HOST / PORT / USERNAME / PASSWORD) maps onto the AWS-shaped fields the
+/// DynamoDB driver actually consumes.
+///
+/// TabularisDB renders a standard HOST/PORT/USERNAME/PASSWORD form for any
+/// driver that does not ship a custom `ui_extensions` connection UI. Those
+/// generic values are semantically valid for DynamoDB Local:
+///   - `host` + `port`        → `endpoint`  (http://host:port)
+///   - `username` / `password` → `access_key_id` / `secret_access_key`
+///
+/// Explicit AWS keys always win; the generic fields are only consulted as
+/// fallbacks when the corresponding AWS field is absent. This keeps the #29
+/// validation meaningful while letting the out-of-the-box GUI form connect.
+fn normalized_params(params: &Value) -> Value {
+    let mut out = params.clone();
+    let obj = match out.as_object_mut() {
+        Some(o) => o,
+        None => return out,
+    };
+    let inner_val = obj
+        .entry("params")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let inner = match inner_val.as_object_mut() {
+        Some(m) => m,
+        None => return out,
+    };
+
+    // host + port -> endpoint (only if no endpoint already supplied).
+    if !inner.contains_key("endpoint") {
+        let host = inner
+            .get("host")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+        let port = inner.get("port").and_then(|v| match v {
+            Value::String(s) => Some(s.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
+        if let (Some(host), Some(port)) = (host, port) {
+            if !host.is_empty() && !port.is_empty() {
+                let scheme = if host.starts_with("http://") || host.starts_with("https://") {
+                    ""
+                } else {
+                    "http://"
+                };
+                let host = host
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://");
+                inner.insert(
+                    "endpoint".to_string(),
+                    Value::String(format!("{scheme}{host}:{port}")),
+                );
+            }
+        }
+    }
+
+    // username -> access_key_id (fallback).
+    if !inner.contains_key("access_key_id") {
+        if let Some(u) = inner
+            .get("username")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            inner.insert(
+                "access_key_id".to_string(),
+                Value::String(u.trim().to_string()),
+            );
+        }
+    }
+    // password -> secret_access_key (fallback).
+    if !inner.contains_key("secret_access_key") {
+        if let Some(p) = inner
+            .get("password")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            inner.insert(
+                "secret_access_key".to_string(),
+                Value::String(p.trim().to_string()),
+            );
+        }
+    }
+
+    // The AWS SDK requires a region for request signing even when talking to a
+    // local endpoint (e.g. DynamoDB Local). Default it when an endpoint is set
+    // but no region was supplied — the generic GUI form has no region field.
+    if inner.contains_key("endpoint")
+        && !inner.contains_key("region")
+        && !inner.contains_key("profile")
+    {
+        inner.insert("region".to_string(), Value::String("us-east-1".to_string()));
+    }
+
+    out
+}
+
 /// Build a DynamoDB client from a JSON-RPC params object, validating the
 /// connection configuration first.
 ///
@@ -33,12 +129,16 @@ fn read_param<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 /// resolving credentials from the ambient environment, which would make the
 /// connection "test" meaningless.
 pub async fn build_client(params: &Value) -> Result<Client, PluginError> {
-    let region = read_param(params, "region");
-    let access_key_id = read_param(params, "access_key_id");
-    let secret_access_key = read_param(params, "secret_access_key");
-    let session_token = read_param(params, "session_token");
-    let profile = read_param(params, "profile");
-    let endpoint = read_param(params, "endpoint");
+    // Map generic GUI fields (host/port/username/password) onto AWS-shaped
+    // keys before reading, so TabularisDB's default connection form works.
+    let params = normalized_params(params);
+
+    let region = read_param(&params, "region");
+    let access_key_id = read_param(&params, "access_key_id");
+    let secret_access_key = read_param(&params, "secret_access_key");
+    let session_token = read_param(&params, "session_token");
+    let profile = read_param(&params, "profile");
+    let endpoint = read_param(&params, "endpoint");
 
     let has_endpoint = endpoint.is_some();
     let has_explicit_creds =
@@ -112,5 +212,80 @@ mod tests {
         let params = json!({"params": {"region": "us-east-1"}});
         let err = build_client(&params).await.unwrap_err();
         assert!(err.message.contains("connection params required"));
+    }
+
+    // ── Generic GUI form normalisation ──────────────────────────────────
+
+    #[test]
+    fn normalizes_host_port_to_endpoint() {
+        let params = json!({"params": {"host": "localhost", "port": "8000"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["endpoint"], "http://localhost:8000");
+    }
+
+    #[test]
+    fn normalizes_numeric_port() {
+        let params = json!({"params": {"host": "localhost", "port": 8000}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["endpoint"], "http://localhost:8000");
+    }
+
+    #[test]
+    fn normalizes_credentials() {
+        let params = json!({"params": {"username": "local", "password": "local"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["access_key_id"], "local");
+        assert_eq!(n["params"]["secret_access_key"], "local");
+    }
+
+    #[test]
+    fn explicit_aws_keys_win_over_generic() {
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-east-1.amazonaws.com",
+            "host": "localhost",
+            "port": "8000",
+            "access_key_id": "AKIA",
+            "username": "local",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(
+            n["params"]["endpoint"],
+            "https://dynamodb.us-east-1.amazonaws.com"
+        );
+        assert_eq!(n["params"]["access_key_id"], "AKIA");
+    }
+
+    #[test]
+    fn defaults_region_when_endpoint_present() {
+        let params = json!({"params": {"host": "localhost", "port": "8000"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn does_not_override_explicit_region() {
+        let params =
+            json!({"params": {"endpoint": "http://localhost:8000", "region": "eu-west-1"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[tokio::test]
+    async fn generic_gui_form_is_accepted() {
+        // Exactly what TabularisDB's default connection form sends.
+        let params = json!({"params": {
+            "host": "localhost",
+            "port": "8000",
+            "username": "local",
+            "password": "local",
+        }});
+        match build_client(&params).await {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.message.contains("connection params required"),
+                "generic form should satisfy validation, got: {}",
+                e.message
+            ),
+        }
     }
 }
