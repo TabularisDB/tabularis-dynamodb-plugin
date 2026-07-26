@@ -34,10 +34,12 @@ pub async fn handle_line(line: &str) -> Value {
         "get_tables" => handlers::metadata::get_tables(id, &params).await,
         "get_columns" => handlers::metadata::get_columns(id, &params).await,
         // DynamoDB has no database/schema concept — tables are the top-level
-        // namespace. Return an empty list rather than a fabricated "default"
-        // entry so clients don't try to switch to a nonexistent database (#25).
-        "get_databases" => ok_response(id, json!([])),
-        "get_schemas" => ok_response(id, json!([])),
+        // namespace. Return a single synthetic "default" entry so GUIs that
+        // gate initial table loading on database selection will auto-select
+        // it and trigger get_tables. Previously returned [] which caused
+        // the table sidebar to stay empty until a manual refresh (#32).
+        "get_databases" => ok_response(id, json!([{"name": "default"}])),
+        "get_schemas" => ok_response(id, json!([{"name": "default"}])),
         "get_routines" => ok_response(id, json!([])),
         "get_views" => ok_response(id, json!([])),
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params).await,
@@ -61,6 +63,7 @@ pub async fn handle_line(line: &str) -> Value {
         }
         "drop_index" => handlers::ddl::drop_index(id, &params).await,
         "drop_foreign_key" => handlers::ddl::drop_foreign_key(id, &params).await,
+        "drop_table" => handlers::ddl::drop_table(id, &params).await,
 
         other => not_implemented(id, other),
     }
@@ -128,17 +131,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_get_databases_returns_empty() {
+    async fn handle_get_databases_returns_default() {
         let line = r#"{"jsonrpc":"2.0","method":"get_databases","id":1}"#;
         let response = handle_line(line).await;
-        assert_eq!(response["result"], json!([]));
+        assert_eq!(response["result"], json!([{"name": "default"}]));
     }
 
     #[tokio::test]
-    async fn handle_get_schemas_returns_empty() {
+    async fn handle_get_schemas_returns_default() {
         let line = r#"{"jsonrpc":"2.0","method":"get_schemas","id":1}"#;
         let response = handle_line(line).await;
-        assert_eq!(response["result"], json!([]));
+        assert_eq!(response["result"], json!([{"name": "default"}]));
     }
 
     #[tokio::test]

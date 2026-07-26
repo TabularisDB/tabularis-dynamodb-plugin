@@ -24,7 +24,7 @@ async fn full_get_databases_flow() {
     let resp = rpc::handle_line(req).await;
 
     assert_eq!(resp["jsonrpc"], "2.0");
-    assert_eq!(resp["result"], json!([]));
+    assert_eq!(resp["result"], json!([{"name": "default"}]));
     assert_eq!(resp["id"], 2);
 }
 
@@ -33,7 +33,7 @@ async fn full_get_schemas_flow() {
     let req = r#"{"jsonrpc":"2.0","method":"get_schemas","id":3}"#;
     let resp = rpc::handle_line(req).await;
 
-    assert_eq!(resp["result"], json!([]));
+    assert_eq!(resp["result"], json!([{"name": "default"}]));
 }
 
 #[tokio::test]

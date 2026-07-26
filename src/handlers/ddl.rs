@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::error::ErrorCode;
+use crate::handlers::connection;
 use crate::rpc::{error_response, ok_response};
 
 /// Generate a PartiQL CREATE TABLE statement.
@@ -259,6 +260,45 @@ pub async fn drop_foreign_key(id: Value, _params: &Value) -> Value {
     )
 }
 
+/// Drop a table via the native DynamoDB DeleteTable control-plane API.
+///
+/// The TabularisDB GUI invokes `drop_table` directly when the user deletes a
+/// table from the sidebar. Unlike the `execute_query` DDL interception path
+/// (which requires `allow_destructive: true`), this handler is an explicit
+/// user-initiated action from the GUI's delete confirmation dialog, so no
+/// additional destructive guard is applied here.
+pub async fn drop_table(id: Value, params: &Value) -> Value {
+    let table_name = params
+        .get("table")
+        .and_then(|t| t.as_str())
+        .or_else(|| params.get("table_name").and_then(|t| t.as_str()))
+        .unwrap_or("");
+
+    if table_name.is_empty() {
+        return error_response(
+            id,
+            ErrorCode::InvalidParams,
+            "table must be a non-empty string",
+        );
+    }
+
+    let client = match connection::build_client(params).await {
+        Ok(c) => c,
+        Err(err) => return error_response(id, err.code, &err.message),
+    };
+
+    match client.delete_table(table_name).await {
+        Ok(()) => ok_response(
+            id,
+            json!({
+                "success": true,
+                "message": format!("Table \"{table_name}\" deleted")
+            }),
+        ),
+        Err(err) => error_response(id, err.code, &err.message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +425,46 @@ mod tests {
         let result = get_create_foreign_key_sql(json!(1), &params).await;
         let statements = result["result"].as_array().unwrap();
         assert!(statements[0].as_str().unwrap().contains("does not support"));
+    }
+
+    #[tokio::test]
+    async fn drop_table_with_missing_table_returns_error() {
+        let params = json!({"params": {"host": "localhost", "port": "8000"}});
+        let result = drop_table(json!(1), &params).await;
+        assert!(result.get("error").is_some());
+        assert_eq!(
+            result["error"]["message"],
+            "table must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_table_with_empty_table_returns_error() {
+        let params = json!({"params": {"host": "localhost", "port": "8000"}, "table": ""});
+        let result = drop_table(json!(1), &params).await;
+        assert!(result.get("error").is_some());
+        assert_eq!(
+            result["error"]["message"],
+            "table must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_table_accepts_table_name_param() {
+        // Both "table" and "table_name" should be accepted as the table
+        // identifier. Without a live endpoint the client construction will
+        // fail, but it must NOT fail on "table must be a non-empty string".
+        let params = json!({
+            "params": {"host": "localhost", "port": "8000", "username": "x", "password": "x"},
+            "table_name": "my-table"
+        });
+        let result = drop_table(json!(1), &params).await;
+        // If there's an error it should be a connection error, not a param error.
+        if let Some(err) = result.get("error") {
+            assert!(
+                !err["message"].as_str().unwrap().contains("table must be"),
+                "table_name param was not recognised"
+            );
+        }
     }
 }
