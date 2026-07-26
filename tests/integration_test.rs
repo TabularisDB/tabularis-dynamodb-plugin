@@ -226,6 +226,8 @@ async fn full_execute_query_response_serialization() {
         truncated: false,
         has_more: false,
         pagination: None,
+        consumed_capacity: Some(2.5),
+        warning: None,
     };
 
     let serialized = serde_json::to_value(&resp).unwrap();
@@ -233,4 +235,7 @@ async fn full_execute_query_response_serialization() {
     assert_eq!(serialized["rows"][0][0], "1");
     assert_eq!(serialized["affected_rows"], 1);
     assert_eq!(serialized["execution_time_ms"], 42);
+    // #8: consumed_capacity is reported when present; warning is omitted when None.
+    assert_eq!(serialized["consumed_capacity"], 2.5);
+    assert!(serialized.get("warning").is_none());
 }
