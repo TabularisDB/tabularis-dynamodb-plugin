@@ -116,6 +116,204 @@ fn destructive_warning(statement: &str) -> Option<String> {
     None
 }
 
+/// A DDL statement translated from PartiQL into a native DynamoDB control-plane
+/// call. DynamoDB PartiQL is DML-only — `CREATE TABLE` / `DROP TABLE` are
+/// rejected by `ExecuteStatement` with a cryptic "service error", so they must
+/// be routed through the native `CreateTable` / `DeleteTable` APIs instead.
+enum DdlStatement {
+    CreateTable {
+        table_name: String,
+        partition_key: String,
+        sort_key: Option<String>,
+        key_types: std::collections::HashMap<String, String>,
+    },
+    DropTable {
+        table_name: String,
+    },
+}
+
+/// Detect and parse a DDL statement, returning `None` for DML (which flows on
+/// to `ExecuteStatement`). Supports an optional sort key declared as the second
+/// `PRIMARY KEY` column, e.g. `PRIMARY KEY ("id", "ts")`.
+///
+/// Handles quoted identifiers (`"items"`, `` `items` ``, `[items]`) and the
+/// `IF NOT EXISTS` / `IF EXISTS` suffixes (parsed but not enforced — DynamoDB
+/// has no native idempotent create/drop, so a duplicate create surfaces as a
+/// "table already exists" error from the API).
+fn parse_ddl(statement: &str) -> Option<DdlStatement> {
+    let norm: String = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upper = norm.to_uppercase();
+
+    if upper.starts_with("DROP TABLE") {
+        let after = norm["DROP TABLE".len()..].trim();
+        let table = take_identifier(after)?;
+        return Some(DdlStatement::DropTable { table_name: table });
+    }
+
+    if upper.starts_with("CREATE TABLE") {
+        let rest = norm["CREATE TABLE".len()..].trim();
+        // Split into the table name and the parenthesized column list. The
+        // first '(' opens the columns.
+        let paren = rest.find('(')?;
+        let table = take_identifier(rest[..paren].trim())?;
+        let close = rest.rfind(')')?;
+        if close <= paren {
+            return None;
+        }
+        let cols_src = &rest[paren + 1..close];
+
+        // Walk comma-separated column definitions that sit at the top level
+        // (not nested inside the PRIMARY KEY parentheses).
+        let mut columns: Vec<(String, String)> = Vec::new();
+        let mut key_cols: Vec<String> = Vec::new();
+        for part in split_top_level_commas(cols_src) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let p_upper = part.to_uppercase();
+            if p_upper.starts_with("PRIMARY KEY") {
+                let kp = part.find('(')?;
+                let kc = part.rfind(')')?;
+                if kc > kp {
+                    key_cols = part[kp + 1..kc]
+                        .split(',')
+                        .filter_map(|k| take_identifier(k.trim()))
+                        .collect();
+                }
+            } else if let Some((name, ty)) = parse_column_def(part) {
+                columns.push((name, ty));
+            }
+        }
+
+        let partition_key = key_cols.first().cloned()?;
+        let sort_key = key_cols.get(1).cloned();
+
+        let mut key_types = std::collections::HashMap::new();
+        for (name, ty) in columns {
+            key_types.insert(name, ty);
+        }
+
+        return Some(DdlStatement::CreateTable {
+            table_name: table,
+            partition_key,
+            sort_key,
+            key_types,
+        });
+    }
+
+    None
+}
+
+/// Split on commas that are not nested inside parentheses.
+fn split_top_level_commas(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for c in src.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Parse a single `<name> <TYPE>` column definition, stripping inline
+/// constraints like `NOT NULL`. Returns the identifier and the type token.
+fn parse_column_def(def: &str) -> Option<(String, String)> {
+    let mut tokens = def.split_whitespace();
+    let name = take_identifier(tokens.next()?)?;
+    let ty = tokens.next()?.to_string();
+    Some((name, ty))
+}
+
+/// Extract a leading SQL identifier, stripping a leading `IF NOT EXISTS` /
+/// `IF EXISTS` clause and surrounding quotes/brackets.
+fn take_identifier(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    // Drop a leading `IF NOT EXISTS` / `IF EXISTS` guard (case-insensitive),
+    // keeping the original casing of the identifier that follows.
+    let lower = raw.to_lowercase();
+    let raw = if let Some(rest) = lower.strip_prefix("if not exists ") {
+        &raw[raw.len() - rest.len()..]
+    } else if let Some(rest) = lower.strip_prefix("if exists ") {
+        &raw[raw.len() - rest.len()..]
+    } else {
+        raw
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let ident: String = match bytes[0] {
+        b'"' => raw.chars().skip(1).take_while(|&c| c != '"').collect(),
+        b'`' => raw.chars().skip(1).take_while(|&c| c != '`').collect(),
+        b'[' => raw.chars().skip(1).take_while(|&c| c != ']').collect(),
+        _ => raw
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+            .collect(),
+    };
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident)
+    }
+}
+
+/// Execute a parsed DDL statement against the native DynamoDB control plane.
+async fn execute_ddl(
+    client: &crate::dynamodb::client::Client,
+    ddl: DdlStatement,
+    started: std::time::Instant,
+) -> Result<ExecuteQueryResponse, crate::error::PluginError> {
+    match ddl {
+        DdlStatement::CreateTable {
+            table_name,
+            partition_key,
+            sort_key,
+            key_types,
+        } => {
+            client
+                .create_table(&table_name, &partition_key, sort_key.as_deref(), &key_types)
+                .await?;
+            let mut resp = ExecuteQueryResponse::empty();
+            resp.affected_rows = 1;
+            resp.execution_time_ms = started.elapsed().as_millis() as usize;
+            resp.warning = Some(format!(
+                "Created table \"{table_name}\" (partition key: \"{partition_key}\"{})",
+                sort_key
+                    .map(|s| format!(", sort key: \"{s}\""))
+                    .unwrap_or_default()
+            ));
+            Ok(resp)
+        }
+        DdlStatement::DropTable { table_name } => {
+            client.delete_table(&table_name).await?;
+            let mut resp = ExecuteQueryResponse::empty();
+            resp.affected_rows = 1;
+            resp.execution_time_ms = started.elapsed().as_millis() as usize;
+            resp.warning = Some(format!("Dropped table \"{table_name}\""));
+            Ok(resp)
+        }
+    }
+}
+
 /// Build the standard tabular response from a set of DynamoDB items.
 fn items_to_response(
     items: Vec<std::collections::HashMap<String, Value>>,
@@ -350,6 +548,18 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                     resp.warning = Some(warning);
                     return ok_response(id, json!(resp));
                 }
+            }
+
+            // DynamoDB PartiQL is DML-only: CREATE TABLE / DROP TABLE are
+            // rejected by ExecuteStatement with a cryptic "service error".
+            // Intercept DDL and route it through the native control-plane API.
+            // (DROP TABLE still passes through the destructive guard above, so
+            // it only reaches here with allow_destructive=true.)
+            if let Some(ddl) = parse_ddl(&statement) {
+                return match execute_ddl(&client, ddl, started).await {
+                    Ok(resp) => ok_response(id, json!(resp)),
+                    Err(err) => error_response(id, err.code, &err.message),
+                };
             }
 
             let effective_limit = inline_limit.or(param_limit.map(|l| l as usize));
@@ -642,5 +852,97 @@ mod tests {
     fn split_statements_drops_trailing_empty() {
         let got = split_statements("DELETE FROM a WHERE x='1'; DELETE FROM b WHERE y='2';");
         assert_eq!(got.len(), 2);
+    }
+
+    // ---- DDL parsing tests ----
+
+    fn unwrap_create(ddl: Option<DdlStatement>) -> (String, String, Option<String>) {
+        match ddl.expect("expected DDL") {
+            DdlStatement::CreateTable {
+                table_name,
+                partition_key,
+                sort_key,
+                ..
+            } => (table_name, partition_key, sort_key),
+            DdlStatement::DropTable { .. } => panic!("expected CREATE, got DROP"),
+        }
+    }
+
+    #[test]
+    fn ddl_parses_the_reported_gui_query() {
+        // The exact statement the TabularisDB GUI sends for "Create New Table".
+        let sql = "CREATE TABLE \"items\" (\"id\" STRING, \"name\" STRING, PRIMARY KEY (\"id\"))";
+        let (table, pk, sk) = unwrap_create(parse_ddl(sql));
+        assert_eq!(table, "items");
+        assert_eq!(pk, "id");
+        assert_eq!(sk, None);
+    }
+
+    #[test]
+    fn ddl_create_captures_key_types() {
+        let sql = "CREATE TABLE t (id NUMBER, name STRING, PRIMARY KEY (id))";
+        match parse_ddl(sql).expect("ddl") {
+            DdlStatement::CreateTable { key_types, .. } => {
+                assert_eq!(key_types.get("id").map(|s| s.as_str()), Some("NUMBER"));
+                assert_eq!(key_types.get("name").map(|s| s.as_str()), Some("STRING"));
+            }
+            _ => panic!("expected create"),
+        }
+    }
+
+    #[test]
+    fn ddl_create_with_sort_key() {
+        let sql = "CREATE TABLE events (pk STRING, sk STRING, PRIMARY KEY (pk, sk))";
+        let (table, pk, sk) = unwrap_create(parse_ddl(sql));
+        assert_eq!(table, "events");
+        assert_eq!(pk, "pk");
+        assert_eq!(sk.as_deref(), Some("sk"));
+    }
+
+    #[test]
+    fn ddl_create_unquoted_identifiers() {
+        let sql = "CREATE TABLE users (id STRING, PRIMARY KEY (id))";
+        let (table, pk, _) = unwrap_create(parse_ddl(sql));
+        assert_eq!(table, "users");
+        assert_eq!(pk, "id");
+    }
+
+    #[test]
+    fn ddl_create_if_not_exists() {
+        let sql = "CREATE TABLE IF NOT EXISTS \"items\" (\"id\" STRING, PRIMARY KEY (\"id\"))";
+        let (table, pk, _) = unwrap_create(parse_ddl(sql));
+        assert_eq!(table, "items");
+        assert_eq!(pk, "id");
+    }
+
+    #[test]
+    fn ddl_create_is_none_without_primary_key() {
+        // No PRIMARY KEY clause -> cannot build a key schema -> treat as
+        // non-DDL (falls through to ExecuteStatement, which will error, but
+        // we don't guess a key).
+        assert!(parse_ddl("CREATE TABLE t (id STRING)").is_none());
+    }
+
+    #[test]
+    fn ddl_drop_table_quoted() {
+        match parse_ddl("DROP TABLE \"items\"").expect("ddl") {
+            DdlStatement::DropTable { table_name } => assert_eq!(table_name, "items"),
+            _ => panic!("expected drop"),
+        }
+    }
+
+    #[test]
+    fn ddl_drop_table_if_exists() {
+        match parse_ddl("DROP TABLE IF EXISTS items").expect("ddl") {
+            DdlStatement::DropTable { table_name } => assert_eq!(table_name, "items"),
+            _ => panic!("expected drop"),
+        }
+    }
+
+    #[test]
+    fn ddl_is_none_for_dml() {
+        assert!(parse_ddl("SELECT * FROM users").is_none());
+        assert!(parse_ddl("INSERT INTO users VALUE {'id': '1'}").is_none());
+        assert!(parse_ddl("DELETE FROM users WHERE id = '1'").is_none());
     }
 }

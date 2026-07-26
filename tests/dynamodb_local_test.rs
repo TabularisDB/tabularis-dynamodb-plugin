@@ -293,3 +293,87 @@ async fn partiql_transaction_multi_insert_atomic() {
         let _ = call("delete_record", del).await;
     }
 }
+
+// ── DDL: CREATE / DROP TABLE through the native control plane ───────────────
+
+#[tokio::test]
+async fn ddl_create_and_drop_table() {
+    let Some(ep) = endpoint() else { return };
+    // Unique table name so parallel runs never collide.
+    let table = format!("itest_{}", unique_id("ddl"));
+
+    // The exact shape the TabularisDB GUI sends for "Create New Table":
+    // quoted identifiers, STRING columns, a single-column PRIMARY KEY.
+    let mut create = conn_params(&ep);
+    create["query"] = json!(format!(
+        "CREATE TABLE \"{table}\" (\"id\" STRING, \"name\" STRING, PRIMARY KEY (\"id\"));"
+    ));
+    let resp = call("execute_query", create.clone()).await;
+    assert_ok(&resp, "CREATE TABLE via GUI-shaped DDL");
+    assert_eq!(resp["result"]["affected_rows"].as_i64(), Some(1));
+
+    // Table now appears in get_tables.
+    let resp = call("get_tables", conn_params(&ep)).await;
+    assert_ok(&resp, "get_tables after create");
+    let names: Vec<String> = resp["result"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t["name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(names.contains(&table), "created table listed: {names:?}");
+
+    // Re-create must fail cleanly with an "already exists" error, not a
+    // cryptic service error or a panic.
+    let resp = call("execute_query", create).await;
+    let msg = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("already exists"),
+        "expected already-exists error, got: {msg}"
+    );
+
+    // Column schema: id is the partition key.
+    let mut cols = conn_params(&ep);
+    cols["table"] = json!(&table);
+    let resp = call("get_columns", cols).await;
+    assert_ok(&resp, "get_columns on created table");
+    let pk_is_id = resp["result"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .any(|c| c["name"].as_str() == Some("id") && c["is_pk"].as_bool() == Some(true))
+        })
+        .unwrap_or(false);
+    assert!(pk_is_id, "id flagged as partition key");
+
+    // DROP without allow_destructive must be refused (safety guard).
+    let mut drop_guarded = conn_params(&ep);
+    drop_guarded["query"] = json!(format!("DROP TABLE \"{table}\""));
+    let resp = call("execute_query", drop_guarded).await;
+    assert!(
+        resp["result"]["warning"].as_str().is_some(),
+        "DROP TABLE refused without allow_destructive"
+    );
+
+    // DROP with allow_destructive succeeds.
+    let mut drop = conn_params(&ep);
+    drop["query"] = json!(format!("DROP TABLE \"{table}\""));
+    drop["allow_destructive"] = json!(true);
+    let resp = call("execute_query", drop).await;
+    assert_ok(&resp, "DROP TABLE with allow_destructive");
+    assert_eq!(resp["result"]["affected_rows"].as_i64(), Some(1));
+
+    // Table gone.
+    let resp = call("get_tables", conn_params(&ep)).await;
+    let names: Vec<String> = resp["result"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t["name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(!names.contains(&table), "dropped table removed: {names:?}");
+}

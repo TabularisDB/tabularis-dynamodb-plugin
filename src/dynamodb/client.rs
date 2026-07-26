@@ -536,6 +536,136 @@ impl Client {
             consumed_capacity,
         ))
     }
+
+    /// Create a table via the native CreateTable control-plane API.
+    ///
+    /// DynamoDB PartiQL is DML-only, so `CREATE TABLE` statements cannot be
+    /// executed through `ExecuteStatement` — they must be translated into a
+    /// native CreateTable request. `partition_key`/`sort_key` are the key
+    /// attribute names; `key_types` maps key attribute name → DynamoDB scalar
+    /// type code (`S`, `N`, or `B`). Non-key columns are not declared because
+    /// DynamoDB is schemaless outside of its keys.
+    pub async fn create_table(
+        &self,
+        table_name: &str,
+        partition_key: &str,
+        sort_key: Option<&str>,
+        key_types: &std::collections::HashMap<String, String>,
+    ) -> Result<(), PluginError> {
+        use aws_sdk_dynamodb::types::{
+            AttributeDefinition, BillingMode, KeySchemaElement, KeyType,
+        };
+
+        // Partition (HASH) key — always required.
+        let mut attr_defs: Vec<AttributeDefinition> = Vec::new();
+        let mut key_schema: Vec<KeySchemaElement> = Vec::new();
+
+        let build_err = |e: aws_sdk_dynamodb::error::BuildError| {
+            PluginError::internal(format!("invalid CreateTable request: {e}"))
+        };
+
+        let pk_type = scalar_type(key_types.get(partition_key).map(|s| s.as_str()));
+        attr_defs.push(
+            AttributeDefinition::builder()
+                .attribute_name(partition_key)
+                .attribute_type(pk_type)
+                .build()
+                .map_err(build_err)?,
+        );
+        key_schema.push(
+            KeySchemaElement::builder()
+                .attribute_name(partition_key)
+                .key_type(KeyType::Hash)
+                .build()
+                .map_err(build_err)?,
+        );
+
+        // Optional sort (RANGE) key.
+        if let Some(sk) = sort_key {
+            let sk_type = scalar_type(key_types.get(sk).map(|s| s.as_str()));
+            attr_defs.push(
+                AttributeDefinition::builder()
+                    .attribute_name(sk)
+                    .attribute_type(sk_type)
+                    .build()
+                    .map_err(build_err)?,
+            );
+            key_schema.push(
+                KeySchemaElement::builder()
+                    .attribute_name(sk)
+                    .key_type(KeyType::Range)
+                    .build()
+                    .map_err(build_err)?,
+            );
+        }
+
+        let resp = self
+            .inner
+            .create_table()
+            .table_name(table_name)
+            .set_attribute_definitions(Some(attr_defs))
+            .set_key_schema(Some(key_schema))
+            .billing_mode(BillingMode::PayPerRequest)
+            .send()
+            .await;
+
+        match resp {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err = e.into_service_error();
+                if err.is_resource_in_use_exception() {
+                    Err(PluginError::invalid_params(format!(
+                        "table \"{table_name}\" already exists"
+                    )))
+                } else {
+                    Err(PluginError::internal(format!("CreateTable failed: {err}")))
+                }
+            }
+        }
+    }
+
+    /// Drop a table via the native DeleteTable control-plane API.
+    pub async fn delete_table(&self, table_name: &str) -> Result<(), PluginError> {
+        let resp = self
+            .inner
+            .delete_table()
+            .table_name(table_name)
+            .send()
+            .await;
+
+        match resp {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err = e.into_service_error();
+                if err.is_resource_not_found_exception() {
+                    Err(PluginError::invalid_params(format!(
+                        "table \"{table_name}\" not found"
+                    )))
+                } else if err.is_resource_in_use_exception() {
+                    Err(PluginError::invalid_params(format!(
+                        "table \"{table_name}\" is busy (creating or deleting); retry shortly"
+                    )))
+                } else {
+                    Err(PluginError::internal(format!("DeleteTable failed: {err}")))
+                }
+            }
+        }
+    }
+}
+
+/// Map a SQL/DynamoDB type keyword to a DynamoDB scalar attribute type.
+///
+/// Only `S`, `N`, and `B` are valid key attribute types; anything unrecognized
+/// defaults to `S` (String) so a CREATE TABLE with an unusual type still works.
+fn scalar_type(raw: Option<&str>) -> aws_sdk_dynamodb::types::ScalarAttributeType {
+    use aws_sdk_dynamodb::types::ScalarAttributeType;
+    match raw.map(|s| s.to_uppercase()) {
+        Some(t) if t == "N" || t == "NUMBER" || t == "NUMERIC" || t == "INT" || t == "INTEGER" => {
+            ScalarAttributeType::N
+        }
+        Some(t) if t == "B" || t == "BINARY" || t == "BLOB" => ScalarAttributeType::B,
+        _ => ScalarAttributeType::S,
+    }
 }
 
 #[cfg(test)]
