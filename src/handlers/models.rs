@@ -49,6 +49,14 @@ pub struct ExecuteQueryResponse {
     pub truncated: bool,
     pub has_more: bool,
     pub pagination: Option<Value>,
+    /// Consumed read/write capacity units reported by DynamoDB (#8). Only
+    /// present when the underlying API returned capacity information.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_capacity: Option<f64>,
+    /// Warning for destructive operations that were blocked pending
+    /// confirmation (#8). Present when execution was refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 impl ExecuteQueryResponse {
@@ -61,6 +69,8 @@ impl ExecuteQueryResponse {
             truncated: false,
             has_more: false,
             pagination: None,
+            consumed_capacity: None,
+            warning: None,
         }
     }
 }

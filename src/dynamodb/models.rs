@@ -45,11 +45,19 @@ pub struct DescribeTableOutput {
     pub table_size_bytes: Option<i64>,
 }
 
+/// Extract read/write capacity units from a DynamoDB `ConsumedCapacity`.
+/// Returns `None` when the API didn't report capacity (e.g. capacity reporting
+/// was not requested).
+pub(crate) fn consumed_capacity_units(cc: &aws_sdk_dynamodb::types::ConsumedCapacity) -> f64 {
+    cc.capacity_units().unwrap_or(0.0)
+}
+
 /// Output of execute_statement.
 #[derive(Debug, Clone)]
 pub struct ExecuteStatementOutput {
     pub items: Vec<HashMap<String, Value>>,
     pub next_token: Option<String>,
+    pub consumed_capacity: Option<f64>,
 }
 impl ExecuteStatementOutput {
     pub fn from_sdk(
@@ -69,8 +77,13 @@ impl ExecuteStatementOutput {
             .collect();
 
         let next_token = response.next_token().map(|s| s.to_string());
+        let consumed_capacity = response.consumed_capacity().map(consumed_capacity_units);
 
-        Self { items, next_token }
+        Self {
+            items,
+            next_token,
+            consumed_capacity,
+        }
     }
 }
 
@@ -81,12 +94,14 @@ impl ExecuteStatementOutput {
 pub struct ItemOutput {
     pub items: Vec<HashMap<String, Value>>,
     pub next_token: Option<String>,
+    pub consumed_capacity: Option<f64>,
 }
 
 impl ItemOutput {
     pub fn new(
         raw_items: &[HashMap<String, aws_sdk_dynamodb::types::AttributeValue>],
         last_key: Option<&HashMap<String, aws_sdk_dynamodb::types::AttributeValue>>,
+        consumed_capacity: Option<f64>,
     ) -> Self {
         let items = raw_items
             .iter()
@@ -101,7 +116,11 @@ impl ItemOutput {
 
         let next_token = last_key.and_then(encode_last_key);
 
-        Self { items, next_token }
+        Self {
+            items,
+            next_token,
+            consumed_capacity,
+        }
     }
 }
 

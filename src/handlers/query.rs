@@ -53,12 +53,43 @@ fn extract_limit(params: &Value) -> Option<i32> {
         .and_then(|l| i32::try_from(l).ok())
 }
 
+/// Classify a PartiQL statement as destructive for the safety guard (#8).
+/// Returns a human-readable reason when the statement is a DROP TABLE or an
+/// unguarded `DELETE FROM <table>` (no WHERE clause).
+///
+/// Pure helper so the classification can be unit-tested without a live table.
+fn destructive_warning(statement: &str) -> Option<String> {
+    // Normalize: collapse whitespace and uppercase for keyword matching, but
+    // keep the original for quoting back to the caller.
+    let norm: String = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upper = norm.to_uppercase();
+
+    if upper.starts_with("DROP TABLE") {
+        return Some(format!(
+            "Refusing to execute destructive DDL without confirmation: `{norm}`. \
+             Re-run with `allow_destructive: true` to proceed."
+        ));
+    }
+
+    // An unguarded DELETE (DELETE FROM <t> with no WHERE) wipes the table.
+    if upper.starts_with("DELETE FROM") && !upper.contains(" WHERE ") {
+        return Some(format!(
+            "Refusing to execute a WHERE-less DELETE without confirmation: `{norm}`. \
+             This would remove all items from the table. \
+             Re-run with `allow_destructive: true` to proceed, or add a WHERE clause."
+        ));
+    }
+
+    None
+}
+
 /// Build the standard tabular response from a set of DynamoDB items.
 fn items_to_response(
     items: Vec<std::collections::HashMap<String, Value>>,
     next_token: Option<String>,
     limit: Option<usize>,
     execution_time_ms: usize,
+    consumed_capacity: Option<f64>,
 ) -> ExecuteQueryResponse {
     // Union of all keys across all items (DynamoDB is schemaless — each item
     // can have different attributes). Preserves first-seen order.
@@ -99,6 +130,8 @@ fn items_to_response(
         truncated: truncated_by_limit,
         has_more,
         pagination: next_token.map(|t| json!({"next_token": t})),
+        consumed_capacity,
+        warning: None,
         columns,
         rows,
     }
@@ -222,6 +255,10 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     let query = Query::from(query_str);
     let next_token = extract_next_token(params);
     let param_limit = extract_limit(params);
+    let allow_destructive = params
+        .get("allow_destructive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let client = match connection::build_client(params).await {
         Ok(c) => c,
@@ -234,6 +271,16 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         QueryMode::Partiql => {
             // #20: strip an unsupported LIMIT clause and apply it client-side.
             let (statement, inline_limit) = strip_partiql_limit(&query.body);
+
+            // #8: refuse destructive statements without explicit confirmation.
+            if !allow_destructive {
+                if let Some(warning) = destructive_warning(&statement) {
+                    let mut resp = ExecuteQueryResponse::empty();
+                    resp.warning = Some(warning);
+                    return ok_response(id, json!(resp));
+                }
+            }
+
             let effective_limit = inline_limit.or(param_limit.map(|l| l as usize));
 
             let result = match next_token.as_deref() {
@@ -253,6 +300,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.next_token,
                         effective_limit,
                         started.elapsed().as_millis() as usize,
+                        res.consumed_capacity,
                     )),
                 ),
                 Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
@@ -273,6 +321,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.next_token,
                         None,
                         started.elapsed().as_millis() as usize,
+                        res.consumed_capacity,
                     )),
                 ),
                 Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
@@ -325,6 +374,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.next_token,
                         None,
                         started.elapsed().as_millis() as usize,
+                        res.consumed_capacity,
                     )),
                 ),
                 Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
@@ -357,6 +407,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.next_token,
                         None,
                         started.elapsed().as_millis() as usize,
+                        res.consumed_capacity,
                     )),
                 ),
                 Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
@@ -459,5 +510,28 @@ mod tests {
     #[test]
     fn parse_body_requires_table_name() {
         assert!(parse_native_body("Limit: 5").is_err());
+    }
+
+    #[test]
+    fn destructive_guard_flags_drop_table() {
+        assert!(destructive_warning("DROP TABLE users").is_some());
+        assert!(destructive_warning("  drop   table  users ").is_some());
+    }
+
+    #[test]
+    fn destructive_guard_flags_whereless_delete() {
+        assert!(destructive_warning("DELETE FROM users").is_some());
+        assert!(destructive_warning("delete from users").is_some());
+    }
+
+    #[test]
+    fn destructive_guard_allows_guarded_delete() {
+        assert!(destructive_warning("DELETE FROM users WHERE id = 'x'").is_none());
+    }
+
+    #[test]
+    fn destructive_guard_allows_select_and_insert() {
+        assert!(destructive_warning("SELECT * FROM users").is_none());
+        assert!(destructive_warning("INSERT INTO users VALUE {'id': '1'}").is_none());
     }
 }

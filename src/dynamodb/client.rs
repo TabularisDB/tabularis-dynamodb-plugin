@@ -24,6 +24,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// Hard cap on items returned by a single Scan request (#8). Prevents
+    /// runaway full-table scans on large tables; callers page past it with
+    /// the returned `next_token`.
+    pub const MAX_SCAN_ITEMS: i32 = 1000;
+
     /// Create a new DynamoDB client from connection parameters.
     pub async fn new(
         region: Option<&str>,
@@ -233,6 +238,7 @@ impl Client {
             .inner
             .execute_statement()
             .statement(statement)
+            .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total)
             .send()
             .await
             .map_err(|e| PluginError::internal(format!("ExecuteStatement failed: {e}")))?;
@@ -246,7 +252,11 @@ impl Client {
         statement: &str,
         next_token: Option<&str>,
     ) -> Result<ExecuteStatementOutput, PluginError> {
-        let mut request = self.inner.execute_statement().statement(statement);
+        let mut request = self
+            .inner
+            .execute_statement()
+            .statement(statement)
+            .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total);
         if let Some(token) = next_token {
             request = request.next_token(token);
         }
@@ -356,6 +366,10 @@ impl Client {
     }
 
     /// Full table Scan via the native Scan API (supports limit + pagination).
+    ///
+    /// A hard cap (`MAX_SCAN_ITEMS`) bounds items per request to prevent
+    /// runaway full-table scans on large tables (#8). Callers page past it
+    /// with the returned `next_token`.
     pub async fn scan(
         &self,
         table_name: &str,
@@ -364,10 +378,16 @@ impl Client {
             std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue>,
         >,
     ) -> Result<crate::dynamodb::models::ItemOutput, PluginError> {
-        let mut req = self.inner.scan().table_name(table_name);
-        if let Some(l) = limit {
-            req = req.limit(l);
-        }
+        // Enforce the safety cap: use the caller's limit if smaller, otherwise
+        // default to MAX_SCAN_ITEMS (#8).
+        let effective_limit = limit.map_or(Self::MAX_SCAN_ITEMS, |l| l.min(Self::MAX_SCAN_ITEMS));
+
+        let mut req = self
+            .inner
+            .scan()
+            .table_name(table_name)
+            .limit(effective_limit)
+            .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total);
         if let Some(k) = exclusive_start_key {
             req = req.set_exclusive_start_key(Some(k));
         }
@@ -375,9 +395,13 @@ impl Client {
             .send()
             .await
             .map_err(|e| PluginError::internal(format!("Scan failed: {e}")))?;
+        let consumed_capacity = resp
+            .consumed_capacity()
+            .map(super::models::consumed_capacity_units);
         Ok(crate::dynamodb::models::ItemOutput::new(
             resp.items(),
             resp.last_evaluated_key(),
+            consumed_capacity,
         ))
     }
 
@@ -405,6 +429,7 @@ impl Client {
             .query()
             .table_name(&args.table_name)
             .key_condition_expression(key_condition)
+            .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total)
             .set_expression_attribute_names(Some(names))
             .set_expression_attribute_values(Some(values));
         if let Some(l) = args.limit {
@@ -417,9 +442,13 @@ impl Client {
             .send()
             .await
             .map_err(|e| PluginError::internal(format!("Query failed: {e}")))?;
+        let consumed_capacity = resp
+            .consumed_capacity()
+            .map(super::models::consumed_capacity_units);
         Ok(crate::dynamodb::models::ItemOutput::new(
             resp.items(),
             resp.last_evaluated_key(),
+            consumed_capacity,
         ))
     }
 
@@ -433,6 +462,7 @@ impl Client {
             .inner
             .get_item()
             .table_name(table_name)
+            .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total)
             .set_key(Some(key))
             .send()
             .await
@@ -441,7 +471,14 @@ impl Client {
             Some(item) => vec![item.clone()],
             None => vec![],
         };
-        Ok(crate::dynamodb::models::ItemOutput::new(&items, None))
+        let consumed_capacity = resp
+            .consumed_capacity()
+            .map(super::models::consumed_capacity_units);
+        Ok(crate::dynamodb::models::ItemOutput::new(
+            &items,
+            None,
+            consumed_capacity,
+        ))
     }
 }
 
