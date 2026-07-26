@@ -6,6 +6,68 @@ use crate::dynamodb::models::{
 use crate::dynamodb::pool;
 use crate::error::PluginError;
 
+/// Extract the real DynamoDB error message from an `SdkError`.
+///
+/// The SDK's blanket `Display` impl renders service faults as the opaque
+/// string `"service error"`, which hides the actionable detail (e.g.
+/// `ValidationException: Unexpected path component`). For
+/// `ServiceError` variants we reach into the modeled error type and surface
+/// its `message()` plus the error-kind name, so callers see
+/// `ValidationException: Unexpected path component at 1:8:5` instead of a
+/// generic failure.
+fn dynamodb_error_message<E>(prefix: &str, err: &aws_sdk_dynamodb::error::SdkError<E>) -> String
+where
+    E: aws_smithy_types::error::metadata::ProvideErrorMetadata + std::fmt::Display,
+{
+    match err {
+        aws_sdk_dynamodb::error::SdkError::ServiceError(ctx) => {
+            let inner = ctx.err();
+            let meta = inner.meta();
+            let kind = meta
+                .code()
+                .map(str::to_owned)
+                .unwrap_or_else(|| "ServiceError".to_owned());
+            match meta.message() {
+                Some(m) if !m.is_empty() => format!("{prefix}: {kind}: {m}"),
+                _ => {
+                    let display = inner.to_string();
+                    if display.is_empty() || display == "service error" {
+                        format!("{prefix}: {kind}")
+                    } else {
+                        format!("{prefix}: {kind}: {display}")
+                    }
+                }
+            }
+        }
+        _ => format!("{prefix}: {err}"),
+    }
+}
+
+/// Like [`dynamodb_error_message`], but for a service error that has already
+/// been extracted via `SdkError::into_service_error()`. Surfaces the modeled
+/// error kind and message instead of the opaque `Display` string.
+fn service_error_message<E>(prefix: &str, err: &E) -> String
+where
+    E: aws_smithy_types::error::metadata::ProvideErrorMetadata + std::fmt::Display,
+{
+    let meta = err.meta();
+    let kind = meta
+        .code()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "ServiceError".to_owned());
+    match meta.message() {
+        Some(m) if !m.is_empty() => format!("{prefix}: {kind}: {m}"),
+        _ => {
+            let display = err.to_string();
+            if display.is_empty() || display == "service error" {
+                format!("{prefix}: {kind}")
+            } else {
+                format!("{prefix}: {kind}: {display}")
+            }
+        }
+    }
+}
+
 /// Arguments for a native DynamoDB Query (single partition-key lookup).
 #[derive(Debug, Clone)]
 pub struct QueryArgs {
@@ -62,7 +124,9 @@ impl Client {
             .limit(1)
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("DynamoDB ping failed: {e}")))?;
+            .map_err(|e| {
+                PluginError::internal(dynamodb_error_message("DynamoDB ping failed", &e))
+            })?;
         Ok(())
     }
 
@@ -77,10 +141,9 @@ impl Client {
                 request = request.exclusive_start_table_name(last.clone());
             }
 
-            let response = request
-                .send()
-                .await
-                .map_err(|e| PluginError::internal(format!("ListTables failed: {e}")))?;
+            let response = request.send().await.map_err(|e| {
+                PluginError::internal(dynamodb_error_message("ListTables failed", &e))
+            })?;
 
             // table_names() returns &[String]
             table_names.extend(response.table_names().iter().cloned());
@@ -106,7 +169,9 @@ impl Client {
             .table_name(table_name)
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("DescribeTable failed: {e}")))?;
+            .map_err(|e| {
+                PluginError::internal(dynamodb_error_message("DescribeTable failed", &e))
+            })?;
 
         let table = response
             .table()
@@ -243,7 +308,9 @@ impl Client {
             .return_consumed_capacity(aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total)
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("ExecuteStatement failed: {e}")))?;
+            .map_err(|e| {
+                PluginError::internal(dynamodb_error_message("ExecuteStatement failed", &e))
+            })?;
 
         Ok(ExecuteStatementOutput::from_sdk(response))
     }
@@ -263,10 +330,9 @@ impl Client {
             request = request.next_token(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| PluginError::internal(format!("ExecuteStatement failed: {e}")))?;
+        let response = request.send().await.map_err(|e| {
+            PluginError::internal(dynamodb_error_message("ExecuteStatement failed", &e))
+        })?;
 
         Ok(ExecuteStatementOutput::from_sdk(response))
     }
@@ -317,10 +383,9 @@ impl Client {
             req = req.client_request_token(token);
         }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| PluginError::internal(format!("ExecuteTransaction failed: {e}")))?;
+        let response = req.send().await.map_err(|e| {
+            PluginError::internal(dynamodb_error_message("ExecuteTransaction failed", &e))
+        })?;
 
         Ok(TransactionOutput::from_sdk(response, statements.len()))
     }
@@ -377,7 +442,7 @@ impl Client {
                         .to_string(),
                 )
             } else {
-                PluginError::internal(format!("PutItem failed: {svc_err}"))
+                PluginError::internal(service_error_message("PutItem failed", &svc_err))
             }
         })?;
         Ok(())
@@ -401,7 +466,7 @@ impl Client {
             .expression_attribute_values(":val".to_string(), new_val)
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("UpdateItem failed: {e}")))?;
+            .map_err(|e| PluginError::internal(dynamodb_error_message("UpdateItem failed", &e)))?;
         Ok(())
     }
 
@@ -417,7 +482,7 @@ impl Client {
             .set_key(Some(key))
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("DeleteItem failed: {e}")))?;
+            .map_err(|e| PluginError::internal(dynamodb_error_message("DeleteItem failed", &e)))?;
         Ok(())
     }
 
@@ -450,7 +515,7 @@ impl Client {
         let resp = req
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("Scan failed: {e}")))?;
+            .map_err(|e| PluginError::internal(dynamodb_error_message("Scan failed", &e)))?;
         let consumed_capacity = resp
             .consumed_capacity()
             .map(super::models::consumed_capacity_units);
@@ -497,7 +562,7 @@ impl Client {
         let resp = req
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("Query failed: {e}")))?;
+            .map_err(|e| PluginError::internal(dynamodb_error_message("Query failed", &e)))?;
         let consumed_capacity = resp
             .consumed_capacity()
             .map(super::models::consumed_capacity_units);
@@ -522,7 +587,7 @@ impl Client {
             .set_key(Some(key))
             .send()
             .await
-            .map_err(|e| PluginError::internal(format!("GetItem failed: {e}")))?;
+            .map_err(|e| PluginError::internal(dynamodb_error_message("GetItem failed", &e)))?;
         let items = match resp.item() {
             Some(item) => vec![item.clone()],
             None => vec![],
@@ -618,7 +683,10 @@ impl Client {
                         "table \"{table_name}\" already exists"
                     )))
                 } else {
-                    Err(PluginError::internal(format!("CreateTable failed: {err}")))
+                    Err(PluginError::internal(service_error_message(
+                        "CreateTable failed",
+                        &err,
+                    )))
                 }
             }
         }
@@ -646,7 +714,10 @@ impl Client {
                         "table \"{table_name}\" is busy (creating or deleting); retry shortly"
                     )))
                 } else {
-                    Err(PluginError::internal(format!("DeleteTable failed: {err}")))
+                    Err(PluginError::internal(service_error_message(
+                        "DeleteTable failed",
+                        &err,
+                    )))
                 }
             }
         }

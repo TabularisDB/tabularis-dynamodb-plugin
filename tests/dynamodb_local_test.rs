@@ -377,3 +377,145 @@ async fn ddl_create_and_drop_table() {
         .unwrap_or_default();
     assert!(!names.contains(&table), "dropped table removed: {names:?}");
 }
+
+// ── Aggregate functions (client-side over Scan) ─────────────────────────────
+
+/// DynamoDB PartiQL has no aggregate functions, so the plugin intercepts
+/// single-aggregate SELECTs and computes them via native Scan. This test
+/// seeds known values and asserts the exact aggregate results.
+#[tokio::test]
+async fn aggregate_count_sum_avg_min_max() {
+    let Some(ep) = endpoint() else { return };
+    let table = format!("itest_{}", unique_id("agg"));
+
+    // Create an isolated table with a numeric "age" attribute.
+    let mut create = conn_params(&ep);
+    create["query"] = json!(format!(
+        "CREATE TABLE \"{table}\" (\"id\" STRING, \"age\" NUMBER, PRIMARY KEY (\"id\"))"
+    ));
+    let resp = call("execute_query", create).await;
+    assert_ok(&resp, "CREATE TABLE for aggregate test");
+
+    // Helper: insert one item.
+    let insert_age = |id: &str, age: i64| {
+        let mut p = conn_params(&ep);
+        p["table"] = json!(&table);
+        p["data"] = json!({ "id": id, "age": age });
+        p
+    };
+    for (id, age) in [("a", 10i64), ("b", 20), ("c", 30)] {
+        let resp = call("insert_record", insert_age(id, age)).await;
+        assert_ok(&resp, &format!("insert {id}"));
+    }
+
+    // Helper: run an aggregate query, return first row's single value as f64.
+    let run_agg = |sql: String| {
+        let mut p = conn_params(&ep);
+        p["query"] = json!(sql);
+        p
+    };
+
+    // COUNT(*) -> 3
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT COUNT(*) as count FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "COUNT(*)");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(3.0));
+    assert_eq!(resp["result"]["columns"][0].as_str(), Some("count"));
+
+    // SUM(age) -> 60
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT SUM(\"age\") as total FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "SUM");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(60.0));
+
+    // AVG(age) -> 20
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT AVG(\"age\") as mean FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "AVG");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(20.0));
+
+    // MIN(age) -> 10
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT MIN(\"age\") as youngest FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "MIN");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(10.0));
+
+    // MAX(age) -> 30
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT MAX(\"age\") as oldest FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "MAX");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(30.0));
+
+    // COUNT on an absent column counts only present values -> 3 (all have age).
+    let resp = call(
+        "execute_query",
+        run_agg(format!("SELECT COUNT(\"age\") as c FROM \"{table}\"")),
+    )
+    .await;
+    assert_ok(&resp, "COUNT(col)");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(3.0));
+
+    // Clean up.
+    let mut drop = conn_params(&ep);
+    drop["query"] = json!(format!("DROP TABLE \"{table}\""));
+    drop["allow_destructive"] = json!(true);
+    let resp = call("execute_query", drop).await;
+    assert_ok(&resp, "DROP TABLE after aggregate test");
+}
+
+/// An aggregate over an empty table must not panic: COUNT->0, others->null.
+#[tokio::test]
+async fn aggregate_over_empty_table() {
+    let Some(ep) = endpoint() else { return };
+    let table = format!("itest_{}", unique_id("agg0"));
+
+    let mut create = conn_params(&ep);
+    create["query"] = json!(format!(
+        "CREATE TABLE \"{table}\" (\"id\" STRING, \"age\" NUMBER, PRIMARY KEY (\"id\"))"
+    ));
+    let resp = call("execute_query", create).await;
+    assert_ok(&resp, "CREATE TABLE empty-agg");
+
+    // COUNT(*) on empty table -> 0.
+    let mut q = conn_params(&ep);
+    q["query"] = json!(format!("SELECT COUNT(*) as c FROM \"{table}\""));
+    let resp = call("execute_query", q).await;
+    assert_ok(&resp, "COUNT empty");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(0.0));
+
+    // SUM on empty table -> 0 (empty sum).
+    let mut q = conn_params(&ep);
+    q["query"] = json!(format!("SELECT SUM(\"age\") as s FROM \"{table}\""));
+    let resp = call("execute_query", q).await;
+    assert_ok(&resp, "SUM empty");
+    assert_eq!(resp["result"]["rows"][0][0].as_f64(), Some(0.0));
+
+    // AVG on empty table -> null (no values).
+    let mut q = conn_params(&ep);
+    q["query"] = json!(format!("SELECT AVG(\"age\") as a FROM \"{table}\""));
+    let resp = call("execute_query", q).await;
+    assert_ok(&resp, "AVG empty");
+    assert!(resp["result"]["rows"][0][0].is_null());
+
+    // Clean up.
+    let mut drop = conn_params(&ep);
+    drop["query"] = json!(format!("DROP TABLE \"{table}\""));
+    drop["allow_destructive"] = json!(true);
+    let resp = call("execute_query", drop).await;
+    assert_ok(&resp, "DROP TABLE empty-agg");
+}

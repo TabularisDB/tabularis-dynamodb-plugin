@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 use crate::dynamodb::models::decode_pagination_token;
 use crate::error::ErrorCode;
+use crate::error::PluginError;
 use crate::handlers::connection;
 use crate::handlers::models::{ExecuteQueryResponse, Query, QueryMode};
 use crate::rpc::{error_response, ok_response};
@@ -314,6 +315,267 @@ async fn execute_ddl(
     }
 }
 
+// ── Aggregate interception ──────────────────────────────────────────────────
+
+/// Supported aggregate functions.
+#[derive(Debug, Clone, PartialEq)]
+enum AggregateFunc {
+    /// COUNT(*) or COUNT("col")
+    Count { column: Option<String> },
+    /// SUM("col")
+    Sum { column: String },
+    /// AVG("col")
+    Avg { column: String },
+    /// MIN("col")
+    Min { column: String },
+    /// MAX("col")
+    Max { column: String },
+}
+
+/// A parsed single-aggregate SELECT.
+#[derive(Debug, Clone, PartialEq)]
+struct AggregateQuery {
+    table: String,
+    func: AggregateFunc,
+    alias: String,
+}
+
+/// Detect `SELECT AGG(...) [AS alias] FROM "table"`.
+///
+/// Returns `None` for anything that isn't a simple single-aggregate SELECT
+/// (plain column selects, WHERE clauses, JOINs, multiple aggregates, etc.).
+fn parse_aggregate(sql: &str) -> Option<AggregateQuery> {
+    let trimmed = sql.trim();
+    let upper = trimmed.to_uppercase();
+    if !upper.starts_with("SELECT ") {
+        return None;
+    }
+
+    let rest = &trimmed[7..]; // after "SELECT "
+    let upper_rest = rest.to_uppercase();
+    let from_pos = find_keyword(&upper_rest, "FROM")?;
+
+    let select_list = rest[..from_pos].trim();
+    let after_from = rest[from_pos + 4..].trim();
+    let table = take_identifier(after_from)?;
+
+    // Reject WHERE / GROUP BY / HAVING / ORDER BY / LIMIT / JOIN.
+    let upper_after = after_from.to_uppercase();
+    for kw in ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "JOIN"] {
+        if find_keyword(&upper_after, kw).is_some() {
+            return None;
+        }
+    }
+
+    // Parse the aggregate function.
+    let (func_call, alias_part) = split_agg_alias(select_list)?;
+    // Reject multi-expression select lists (e.g. "COUNT(*), SUM(age)"): a
+    // top-level comma means more than one aggregate, which we don't support.
+    if func_call.contains(',') {
+        return None;
+    }
+    let func_upper = func_call.to_uppercase();
+
+    let paren_open = func_upper.find('(')?;
+    let paren_close = func_upper.rfind(')')?;
+    if paren_close < paren_open {
+        return None;
+    }
+
+    let func_name = func_upper[..paren_open].trim();
+    let arg = func_call[paren_open + 1..paren_close].trim();
+
+    let func = match func_name {
+        "COUNT" => {
+            let column = if arg == "*" {
+                None
+            } else {
+                Some(strip_agg_quotes(arg)?)
+            };
+            AggregateFunc::Count { column }
+        }
+        "SUM" => AggregateFunc::Sum {
+            column: strip_agg_quotes(arg)?,
+        },
+        "AVG" => AggregateFunc::Avg {
+            column: strip_agg_quotes(arg)?,
+        },
+        "MIN" => AggregateFunc::Min {
+            column: strip_agg_quotes(arg)?,
+        },
+        "MAX" => AggregateFunc::Max {
+            column: strip_agg_quotes(arg)?,
+        },
+        _ => return None,
+    };
+
+    let alias = alias_part.unwrap_or_else(|| func_name.to_lowercase());
+
+    Some(AggregateQuery { table, func, alias })
+}
+
+/// Split `"FUNC(...) AS alias"` into `("FUNC(...)", Some("alias"))`.
+fn split_agg_alias(select_list: &str) -> Option<(&str, Option<String>)> {
+    let upper = select_list.to_uppercase();
+    if let Some(as_pos) = find_keyword(&upper, "AS") {
+        let func_part = select_list[..as_pos].trim();
+        let alias = take_identifier(select_list[as_pos + 2..].trim())?;
+        Some((func_part, Some(alias)))
+    } else {
+        let s = select_list.trim();
+        if s.contains('(') && s.contains(')') {
+            Some((s, None))
+        } else {
+            None
+        }
+    }
+}
+
+/// Strip surrounding quotes from an aggregate argument. Returns None if empty.
+fn strip_agg_quotes(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('`') && s.ends_with('`') && s.len() >= 2)
+    {
+        Some(s[1..s.len() - 1].to_owned())
+    } else {
+        Some(s.to_owned())
+    }
+}
+
+/// Execute a single-aggregate query by scanning all items and reducing.
+async fn execute_aggregate(
+    client: &crate::dynamodb::client::Client,
+    agg: AggregateQuery,
+    started: std::time::Instant,
+) -> Result<ExecuteQueryResponse, PluginError> {
+    let mut all_items: Vec<std::collections::HashMap<String, Value>> = Vec::new();
+    let mut next_token: Option<String> = None;
+    let mut total_capacity: f64 = 0.0;
+
+    for _ in 0..10_000 {
+        // scan() takes a raw exclusive-start-key but returns a base64 string
+        // token; decode between pages.
+        let esk = next_token
+            .as_deref()
+            .and_then(crate::dynamodb::models::decode_pagination_token);
+        let res = client.scan(&agg.table, None, esk).await?;
+        total_capacity += res.consumed_capacity.unwrap_or(0.0);
+        all_items.extend(res.items);
+        match res.next_token {
+            Some(t) => next_token = Some(t),
+            None => break,
+        }
+    }
+
+    let result_value: Value = match &agg.func {
+        AggregateFunc::Count { column: None } => {
+            Value::Number(serde_json::Number::from(all_items.len() as i64))
+        }
+        AggregateFunc::Count { column: Some(col) } => {
+            let count = all_items
+                .iter()
+                .filter(|item| item.get(col).is_some_and(|v| !v.is_null()))
+                .count();
+            Value::Number(serde_json::Number::from(count as i64))
+        }
+        AggregateFunc::Sum { column } => {
+            let sum: f64 = all_items
+                .iter()
+                .filter_map(|item| item.get(column))
+                .filter_map(as_numeric)
+                .sum();
+            json_number(sum)
+        }
+        AggregateFunc::Avg { column } => {
+            let vals: Vec<f64> = all_items
+                .iter()
+                .filter_map(|item| item.get(column))
+                .filter_map(as_numeric)
+                .collect();
+            if vals.is_empty() {
+                Value::Null
+            } else {
+                json_number(vals.iter().sum::<f64>() / vals.len() as f64)
+            }
+        }
+        AggregateFunc::Min { column } => all_items
+            .iter()
+            .filter_map(|item| item.get(column))
+            .filter_map(as_numeric)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.min(v)))
+            })
+            .map(json_number)
+            .unwrap_or(Value::Null),
+        AggregateFunc::Max { column } => all_items
+            .iter()
+            .filter_map(|item| item.get(column))
+            .filter_map(as_numeric)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            })
+            .map(json_number)
+            .unwrap_or(Value::Null),
+    };
+
+    let mut resp = ExecuteQueryResponse::empty();
+    resp.columns = vec![agg.alias];
+    resp.rows = vec![vec![result_value]];
+    resp.affected_rows = 1;
+    resp.execution_time_ms = started.elapsed().as_millis() as usize;
+    resp.consumed_capacity = if total_capacity > 0.0 {
+        Some(total_capacity)
+    } else {
+        None
+    };
+
+    Ok(resp)
+}
+
+/// Extract a numeric value from a JSON value.
+///
+/// DynamoDB `N` attributes are serialised as JSON *strings* (e.g. `"30"`),
+/// so plain `as_f64()` misses them. Accept both JSON numbers and numeric
+/// strings so aggregates work over either representation.
+fn as_numeric(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Format a float as a JSON number: integers stay integer.
+fn json_number(v: f64) -> Value {
+    if v.fract() == 0.0 && v.abs() < 9_007_199_254_740_992.0 {
+        Value::Number(serde_json::Number::from(v as i64))
+    } else {
+        serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
+    }
+}
+
+/// Find a keyword (e.g. "FROM", "AS") at a word boundary in an uppercased string.
+fn find_keyword(haystack: &str, keyword: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(pos) = haystack[search_from..].find(keyword) {
+        let abs = search_from + pos;
+        let before_ok = abs == 0 || !haystack.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let end = abs + keyword.len();
+        let after_ok = end >= haystack.len() || !haystack.as_bytes()[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return Some(abs);
+        }
+        search_from = abs + 1;
+    }
+    None
+}
+
 /// Build the standard tabular response from a set of DynamoDB items.
 fn items_to_response(
     items: Vec<std::collections::HashMap<String, Value>>,
@@ -560,6 +822,19 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                     Ok(resp) => ok_response(id, json!(resp)),
                     Err(err) => error_response(id, err.code, &err.message),
                 };
+            }
+
+            // DynamoDB PartiQL has no aggregate functions. Intercept simple
+            // single-aggregate SELECTs and compute them client-side via Scan.
+            // Only when no pagination token is in play (aggregates always
+            // return exactly 1 row).
+            if next_token.is_none() {
+                if let Some(agg) = parse_aggregate(&statement) {
+                    return match execute_aggregate(&client, agg, started).await {
+                        Ok(resp) => ok_response(id, json!(resp)),
+                        Err(err) => error_response(id, err.code, &err.message),
+                    };
+                }
             }
 
             let effective_limit = inline_limit.or(param_limit.map(|l| l as usize));
@@ -944,5 +1219,130 @@ mod tests {
         assert!(parse_ddl("SELECT * FROM users").is_none());
         assert!(parse_ddl("INSERT INTO users VALUE {'id': '1'}").is_none());
         assert!(parse_ddl("DELETE FROM users WHERE id = '1'").is_none());
+    }
+
+    // ── Aggregate parser tests ──────────────────────────────────────────────
+
+    fn agg(sql: &str) -> AggregateQuery {
+        parse_aggregate(sql).expect("expected aggregate")
+    }
+
+    #[test]
+    fn aggregate_count_star_with_alias() {
+        // The exact user-reported query.
+        let q = agg("SELECT COUNT(*) as count FROM \"orders\"");
+        assert_eq!(q.table, "orders");
+        assert_eq!(q.func, AggregateFunc::Count { column: None });
+        assert_eq!(q.alias, "count");
+    }
+
+    #[test]
+    fn aggregate_count_star_no_alias_defaults_lowercase() {
+        let q = agg("SELECT COUNT(*) FROM users");
+        assert_eq!(q.func, AggregateFunc::Count { column: None });
+        assert_eq!(q.alias, "count");
+    }
+
+    #[test]
+    fn aggregate_count_column() {
+        let q = agg("SELECT COUNT(\"name\") as named FROM users");
+        assert_eq!(
+            q.func,
+            AggregateFunc::Count {
+                column: Some("name".to_owned())
+            }
+        );
+        assert_eq!(q.alias, "named");
+    }
+
+    #[test]
+    fn aggregate_sum_avg_min_max() {
+        assert_eq!(
+            agg("SELECT SUM(\"age\") as t FROM users").func,
+            AggregateFunc::Sum {
+                column: "age".to_owned()
+            }
+        );
+        assert_eq!(
+            agg("SELECT AVG(age) FROM users").func,
+            AggregateFunc::Avg {
+                column: "age".to_owned()
+            }
+        );
+        assert_eq!(
+            agg("SELECT MIN(\"age\") as youngest FROM users").func,
+            AggregateFunc::Min {
+                column: "age".to_owned()
+            }
+        );
+        assert_eq!(
+            agg("SELECT MAX(`age`) as oldest FROM users").func,
+            AggregateFunc::Max {
+                column: "age".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_case_insensitive_keywords() {
+        let q = agg("select sum(\"age\") as total from users");
+        assert_eq!(
+            q.func,
+            AggregateFunc::Sum {
+                column: "age".to_owned()
+            }
+        );
+        assert_eq!(q.alias, "total");
+    }
+
+    #[test]
+    fn aggregate_rejects_unsupported_clauses() {
+        assert!(parse_aggregate("SELECT COUNT(*) FROM users WHERE id = '1'").is_none());
+        assert!(parse_aggregate("SELECT COUNT(*) FROM users GROUP BY name").is_none());
+        assert!(parse_aggregate("SELECT COUNT(*) FROM users HAVING name = 'x'").is_none());
+        assert!(parse_aggregate("SELECT COUNT(*) FROM users ORDER BY id").is_none());
+        assert!(parse_aggregate("SELECT COUNT(*) FROM users LIMIT 10").is_none());
+        assert!(parse_aggregate("SELECT COUNT(*) FROM a JOIN b ON a.id = b.id").is_none());
+    }
+
+    #[test]
+    fn aggregate_rejects_multiple_aggregates() {
+        // Two aggregates in one select list -> not a simple single-aggregate.
+        assert!(parse_aggregate("SELECT COUNT(*), SUM(age) FROM users").is_none());
+    }
+
+    #[test]
+    fn aggregate_is_none_for_plain_select() {
+        assert!(parse_aggregate("SELECT * FROM users").is_none());
+        assert!(parse_aggregate("SELECT id, name FROM users").is_none());
+    }
+
+    #[test]
+    fn aggregate_rejects_unknown_function() {
+        assert!(parse_aggregate("SELECT MEDIAN(\"age\") FROM users").is_none());
+    }
+
+    // ── Numeric helpers (DynamoDB N attrs are JSON strings) ─────────────────
+
+    #[test]
+    fn as_numeric_accepts_json_number_and_numeric_string() {
+        assert_eq!(as_numeric(&json!(42)), Some(42.0));
+        assert_eq!(as_numeric(&json!("42")), Some(42.0));
+        assert_eq!(as_numeric(&json!("34.5")), Some(34.5));
+        assert_eq!(as_numeric(&json!(" 7 ")), Some(7.0));
+    }
+
+    #[test]
+    fn as_numeric_rejects_non_numeric() {
+        assert_eq!(as_numeric(&json!("hello")), None);
+        assert_eq!(as_numeric(&json!(null)), None);
+        assert_eq!(as_numeric(&json!(true)), None);
+        assert_eq!(as_numeric(&json!(["1"])), None);
+    }
+
+    #[test]
+    fn json_number_keeps_integers_integral() {
+        assert_eq!(json_number(5.0), json!(5));
+        assert_eq!(json_number(34.75), json!(34.75));
     }
 }
