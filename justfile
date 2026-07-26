@@ -42,6 +42,11 @@ test:
 test-verbose:
 	cargo test -- --nocapture
 
+# Run integration tests against DynamoDB Local (requires `just run-dynamodb` +
+# `just seed-dynamodb` first). Skipped automatically if DYNAMODB_ENDPOINT unset.
+test-integration:
+	DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT:-http://localhost:8000} cargo test --test dynamodb_local_test -- --test-threads=1
+
 # Launch the local REPL
 repl:
 	cargo run --bin test_plugin
