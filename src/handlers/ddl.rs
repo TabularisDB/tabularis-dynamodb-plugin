@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ErrorCode;
 use crate::handlers::connection;
+use crate::handlers::models::ExecuteQueryResponse;
 use crate::rpc::{error_response, ok_response};
 
 /// Generate a PartiQL CREATE TABLE statement.
@@ -287,14 +288,20 @@ pub async fn drop_table(id: Value, params: &Value) -> Value {
         Err(err) => return error_response(id, err.code, &err.message),
     };
 
+    let started = std::time::Instant::now();
     match client.delete_table(table_name).await {
-        Ok(()) => ok_response(
-            id,
-            json!({
-                "success": true,
-                "message": format!("Table \"{table_name}\" deleted")
-            }),
-        ),
+        Ok(()) => {
+            // Return the standard ExecuteQueryResponse shape — the same shape
+            // the execute_query DDL path produces (query.rs::execute_ddl). The
+            // GUI keys its history logging and sidebar refresh off this shape;
+            // a bespoke {success, message} object was silently ignored, leaving
+            // no history entry and a stale table in the sidebar.
+            let mut resp = ExecuteQueryResponse::empty();
+            resp.affected_rows = 1;
+            resp.execution_time_ms = started.elapsed().as_millis() as usize;
+            resp.warning = Some(format!("Dropped table \"{table_name}\""));
+            ok_response(id, json!(resp))
+        }
         Err(err) => error_response(id, err.code, &err.message),
     }
 }
