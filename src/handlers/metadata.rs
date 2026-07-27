@@ -22,7 +22,6 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
                 .map(|name| {
                     json!({
                         "name": name,
-                        "schema": null,
                         "comment": null,
                     })
                 })
