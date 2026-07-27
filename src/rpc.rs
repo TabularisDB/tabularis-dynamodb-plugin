@@ -38,8 +38,8 @@ pub async fn handle_line(line: &str) -> Value {
         // gate initial table loading on database selection will auto-select
         // it and trigger get_tables. Previously returned [] which caused
         // the table sidebar to stay empty until a manual refresh (#32).
-        "get_databases" => ok_response(id, json!([{"name": "default"}])),
-        "get_schemas" => ok_response(id, json!([{"name": "default"}])),
+        "get_databases" => ok_response(id, json!(["default"])),
+        "get_schemas" => ok_response(id, json!(["default"])),
         "get_routines" => ok_response(id, json!([])),
         "get_views" => ok_response(id, json!([])),
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params).await,
@@ -134,14 +134,14 @@ mod tests {
     async fn handle_get_databases_returns_default() {
         let line = r#"{"jsonrpc":"2.0","method":"get_databases","id":1}"#;
         let response = handle_line(line).await;
-        assert_eq!(response["result"], json!([{"name": "default"}]));
+        assert_eq!(response["result"], json!(["default"]));
     }
 
     #[tokio::test]
     async fn handle_get_schemas_returns_default() {
         let line = r#"{"jsonrpc":"2.0","method":"get_schemas","id":1}"#;
         let response = handle_line(line).await;
-        assert_eq!(response["result"], json!([{"name": "default"}]));
+        assert_eq!(response["result"], json!(["default"]));
     }
 
     #[tokio::test]
