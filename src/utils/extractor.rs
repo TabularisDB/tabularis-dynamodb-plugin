@@ -41,11 +41,36 @@ pub fn extract_url(params: &Value) -> Option<String> {
 }
 
 /// Extracts the table name from the params object.
+///
+/// The TabularisDB GUI surfaces the selected table name in one of several
+/// locations depending on the workflow context. Check the top-level keys first,
+/// then fall back to the nested `params.params` object (the same shape the
+/// connection handler reads for credentials / endpoint). Accept both `table`
+/// and `table_name` (the `drop_table` handler supports both).
 pub fn extract_table(params: &Value) -> Option<String> {
-    params
+    // Top-level: "table" or "table_name"
+    let top = params
         .get("table")
+        .or_else(|| params.get("table_name"))
         .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(t) = top {
+        return Some(t.to_string());
+    }
+
+    // Nested inside params.params (the GUI's output shape for tab-targeted
+    // metadata queries like get_columns / get_indexes).
+    let nested = params
+        .get("params")
+        .and_then(|p| p.get("table"))
+        .or_else(|| params.get("params").and_then(|p| p.get("table_name")))
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty());
+    if let Some(t) = nested {
+        return Some(t.to_string());
+    }
+
+    None
 }
 
 /// Extracts the query string from the params object.
@@ -53,6 +78,13 @@ pub fn extract_query(params: &Value) -> Option<String> {
     params
         .get("query")
         .and_then(|d| d.as_str())
+        .or_else(|| {
+            params
+                .get("params")
+                .and_then(|p| p.get("query"))
+                .and_then(|d| d.as_str())
+        })
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -61,6 +93,13 @@ pub fn extract_schema(params: &Value) -> Option<String> {
     params
         .get("schema")
         .and_then(|s| s.as_str())
+        .or_else(|| {
+            params
+                .get("params")
+                .and_then(|p| p.get("schema"))
+                .and_then(|s| s.as_str())
+        })
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -136,6 +175,24 @@ mod tests {
     fn extract_table_returns_table_name() {
         let params = json!({"table": "users"});
         assert_eq!(extract_table(&params), Some("users".into()));
+    }
+
+    #[test]
+    fn extract_table_accepts_table_name_key() {
+        let params = json!({"table_name": "orders"});
+        assert_eq!(extract_table(&params), Some("orders".into()));
+    }
+
+    #[test]
+    fn extract_table_looks_inside_nested_params() {
+        let params = json!({"params": {"table": "users"}});
+        assert_eq!(extract_table(&params), Some("users".into()));
+    }
+
+    #[test]
+    fn extract_table_looks_inside_nested_params_table_name() {
+        let params = json!({"params": {"table_name": "orders"}});
+        assert_eq!(extract_table(&params), Some("orders".into()));
     }
 
     #[test]
