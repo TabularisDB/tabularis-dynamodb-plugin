@@ -348,21 +348,12 @@ async fn ddl_create_and_drop_table() {
         .unwrap_or(false);
     assert!(pk_is_id, "id flagged as partition key");
 
-    // DROP without allow_destructive must be refused (safety guard).
-    let mut drop_guarded = conn_params(&ep);
-    drop_guarded["query"] = json!(format!("DROP TABLE \"{table}\""));
-    let resp = call("execute_query", drop_guarded).await;
-    assert!(
-        resp["result"]["warning"].as_str().is_some(),
-        "DROP TABLE refused without allow_destructive"
-    );
-
-    // DROP with allow_destructive succeeds.
+    // DROP succeeds without allow_destructive — the GUI shows its own
+    // confirmation dialog, and blocking would leave the table lingering.
     let mut drop = conn_params(&ep);
     drop["query"] = json!(format!("DROP TABLE \"{table}\""));
-    drop["allow_destructive"] = json!(true);
     let resp = call("execute_query", drop).await;
-    assert_ok(&resp, "DROP TABLE with allow_destructive");
+    assert_ok(&resp, "DROP TABLE without allow_destructive");
     assert_eq!(resp["result"]["affected_rows"].as_i64(), Some(1));
 
     // Table gone.

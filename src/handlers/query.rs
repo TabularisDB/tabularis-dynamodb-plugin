@@ -88,8 +88,13 @@ fn split_statements(body: &str) -> Vec<String> {
 }
 
 /// Classify a PartiQL statement as destructive for the safety guard (#8).
-/// Returns a human-readable reason when the statement is a DROP TABLE or an
-/// unguarded `DELETE FROM <table>` (no WHERE clause).
+/// Returns a human-readable reason when the statement is an unguarded
+/// `DELETE FROM <table>` (no WHERE clause).
+///
+/// DROP TABLE is intentionally NOT blocked here — the GUI shows its own
+/// confirmation dialog before sending the statement, and DynamoDB routes
+/// it through the native DeleteTable API regardless. Blocking it would
+/// cause the GUI to silently "succeed" while the table remains.
 ///
 /// Pure helper so the classification can be unit-tested without a live table.
 fn destructive_warning(statement: &str) -> Option<String> {
@@ -97,13 +102,6 @@ fn destructive_warning(statement: &str) -> Option<String> {
     // keep the original for quoting back to the caller.
     let norm: String = statement.split_whitespace().collect::<Vec<_>>().join(" ");
     let upper = norm.to_uppercase();
-
-    if upper.starts_with("DROP TABLE") {
-        return Some(format!(
-            "Refusing to execute destructive DDL without confirmation: `{norm}`. \
-             Re-run with `allow_destructive: true` to proceed."
-        ));
-    }
 
     // An unguarded DELETE (DELETE FROM <t> with no WHERE) wipes the table.
     if upper.starts_with("DELETE FROM") && !upper.contains(" WHERE ") {
@@ -815,8 +813,6 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             // DynamoDB PartiQL is DML-only: CREATE TABLE / DROP TABLE are
             // rejected by ExecuteStatement with a cryptic "service error".
             // Intercept DDL and route it through the native control-plane API.
-            // (DROP TABLE still passes through the destructive guard above, so
-            // it only reaches here with allow_destructive=true.)
             if let Some(ddl) = parse_ddl(&statement) {
                 return match execute_ddl(&client, ddl, started).await {
                     Ok(resp) => ok_response(id, json!(resp)),
@@ -1069,9 +1065,12 @@ mod tests {
     }
 
     #[test]
-    fn destructive_guard_flags_drop_table() {
-        assert!(destructive_warning("DROP TABLE users").is_some());
-        assert!(destructive_warning("  drop   table  users ").is_some());
+    fn destructive_guard_does_not_block_drop_table() {
+        // DROP TABLE is intentionally not blocked: the GUI shows its own
+        // confirmation dialog before sending it, and blocking would cause
+        // the GUI to silently "succeed" while the table remains.
+        assert!(destructive_warning("DROP TABLE users").is_none());
+        assert!(destructive_warning("  drop   table  users ").is_none());
     }
 
     #[test]
