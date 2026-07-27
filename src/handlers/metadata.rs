@@ -22,12 +22,19 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
                 // Fetch full table metadata via describe_table
                 match client.describe_table(&name).await {
                     Ok(desc) => {
+                        // Also get columns and indexes for counts
+                        let columns_count = desc.columns.len();
+                        let indexes_count = desc.indexes.len();
+                        
                         results.push(json!({
                             "name": name,
                             "comment": null,
                             "item_count": desc.item_count.unwrap_or(0),
                             "table_size_bytes": desc.table_size_bytes.unwrap_or(0),
                             "table_status": desc.table_status.unwrap_or_else(|| "ACTIVE".to_string()),
+                            "column_count": columns_count,
+                            "index_count": indexes_count,
+                            "foreign_key_count": 0, // DynamoDB has no foreign keys
                         }));
                     }
                     Err(_) => {
@@ -38,6 +45,9 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
                             "item_count": 0,
                             "table_size_bytes": 0,
                             "table_status": "UNKNOWN",
+                            "column_count": 0,
+                            "index_count": 0,
+                            "foreign_key_count": 0,
                         }));
                     }
                 }
