@@ -108,15 +108,23 @@ pub async fn get_indexes(id: Value, params: &Value) -> Value {
 
     match client.describe_table(&table_name).await {
         Ok(desc) => {
+            // The GUI (src/utils/indexes.ts groupIndexes) expects one row per
+            // indexed column with `column_name` (singular), then collapses
+            // rows client-side into grouped indexes. Returning `columns`
+            // (array) leaves the GUI showing 0 indexes because it can't
+            // match the shape it expects.
             let indexes: Vec<Value> = desc
                 .indexes
                 .iter()
-                .map(|idx| {
-                    json!({
-                        "name": idx.name,
-                        "columns": idx.columns,
-                        "is_unique": idx.is_unique,
-                        "is_primary": idx.is_primary,
+                .flat_map(|idx| {
+                    idx.columns.iter().enumerate().map(move |(seq, col)| {
+                        json!({
+                            "name": &idx.name,
+                            "column_name": col,
+                            "is_unique": idx.is_unique,
+                            "is_primary": idx.is_primary,
+                            "seq_in_index": seq + 1,
+                        })
                     })
                 })
                 .collect();
