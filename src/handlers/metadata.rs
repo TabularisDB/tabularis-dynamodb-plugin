@@ -8,7 +8,7 @@ use crate::handlers::models::ColumnResponse;
 use crate::rpc::{error_response, ok_response};
 use crate::utils::extractor;
 
-/// Returns the list of tables in DynamoDB.
+/// Returns the list of tables in DynamoDB with metadata.
 pub async fn get_tables(id: Value, params: &Value) -> Value {
     let client = match connection::build_client(params).await {
         Ok(c) => c,
@@ -16,17 +16,33 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
     };
 
     match client.list_tables().await {
-        Ok(tables) => {
-            let result: Vec<Value> = tables
-                .into_iter()
-                .map(|name| {
-                    json!({
-                        "name": name,
-                        "comment": null,
-                    })
-                })
-                .collect();
-            ok_response(id, json!(result))
+        Ok(table_names) => {
+            let mut results = Vec::new();
+            for name in table_names {
+                // Fetch full table metadata via describe_table
+                match client.describe_table(&name).await {
+                    Ok(desc) => {
+                        results.push(json!({
+                            "name": name,
+                            "comment": null,
+                            "item_count": desc.item_count.unwrap_or(0),
+                            "table_size_bytes": desc.table_size_bytes.unwrap_or(0),
+                            "table_status": desc.table_status.unwrap_or_else(|| "ACTIVE".to_string()),
+                        }));
+                    }
+                    Err(_) => {
+                        // Fallback if describe_table fails
+                        results.push(json!({
+                            "name": name,
+                            "comment": null,
+                            "item_count": 0,
+                            "table_size_bytes": 0,
+                            "table_status": "UNKNOWN",
+                        }));
+                    }
+                }
+            }
+            ok_response(id, json!(results))
         }
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
     }
