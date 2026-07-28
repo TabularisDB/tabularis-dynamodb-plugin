@@ -88,7 +88,7 @@ If your version of Tabularis supports plugin management, the DynamoDB plugin can
 
 1. Download the latest release for your platform from the [Releases page](https://github.com/TabularisDB/tabularis-dynamodb-plugin/releases).
 2. Extract the archive.
-3. Copy `dynamodb-plugin` (or `dynamodb-plugin.exe` on Windows) and `manifest.json` into the Tabularis plugins directory:
+3. Copy `dynamodb-plugin` (or `dynamodb-plugin.exe` on Windows) and `.tabularium` into the Tabularis plugins directory:
 
 | OS | Plugins Directory |
 |---|---|
@@ -198,7 +198,7 @@ just dev-install
 
 # Or manually copy
 cp target/release/dynamodb-plugin ~/.local/share/tabularis/plugins/dynamodb/
-cp manifest.json ~/.local/share/tabularis/plugins/dynamodb/
+cp .tabularium ~/.local/share/tabularis/plugins/dynamodb/
 ```
 
 ## Development

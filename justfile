@@ -89,7 +89,7 @@ build-ui:
 dev-install: build
 	mkdir -p ~/.local/share/tabularis/plugins/dynamodb
 	cp target/debug/dynamodb-plugin ~/.local/share/tabularis/plugins/dynamodb/
-	cp manifest.json ~/.local/share/tabularis/plugins/dynamodb/
+	cp .tabularium ~/.local/share/tabularis/plugins/dynamodb/
 	@if [ -f ui/dist/index.js ]; then \
 		mkdir -p ~/.local/share/tabularis/plugins/dynamodb/ui/dist; \
 		cp ui/dist/index.js ~/.local/share/tabularis/plugins/dynamodb/ui/dist/; \
@@ -101,7 +101,7 @@ dev-install: build
 dev-install: build
 	mkdir -p "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb"
 	cp target/debug/dynamodb-plugin "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/"
-	cp manifest.json "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/"
+	cp .tabularium "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/"
 	@if [ -f ui/dist/index.js ]; then \
 		mkdir -p "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/ui/dist"; \
 		cp ui/dist/index.js "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/ui/dist/"; \
@@ -115,7 +115,7 @@ dev-install: build
 	$dest = Join-Path $env:APPDATA "debba\tabularis\data\plugins\dynamodb"
 	New-Item -ItemType Directory -Force -Path $dest | Out-Null
 	Copy-Item "target\debug\dynamodb-plugin.exe" $dest
-	Copy-Item "manifest.json" $dest
+	Copy-Item ".tabularium" $dest
 	if (Test-Path "ui\dist\index.js") {
 		New-Item -ItemType Directory -Force -Path "$dest\ui\dist" | Out-Null
 		Copy-Item "ui\dist\index.js" "$dest\ui\dist"
