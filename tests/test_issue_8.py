@@ -3,7 +3,7 @@
 import json
 import subprocess
 
-PLUGIN = "./target/release/dynamodb-plugin.exe"
+PLUGIN = "../target/release/dynamodb-plugin.exe"
 PARAMS = {
     "params": {
         "region": "us-east-1",

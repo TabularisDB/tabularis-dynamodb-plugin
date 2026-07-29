@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-BINARY = "target/release/dynamodb-plugin.exe"
+BINARY = "../target/release/dynamodb-plugin.exe"
 CONN = {
     "region": "us-east-1",
     "access_key_id": "test",
