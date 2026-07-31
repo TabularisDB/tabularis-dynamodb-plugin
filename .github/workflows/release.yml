@@ -41,7 +41,7 @@ jobs:
             binary-suffix: ".exe"
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -132,7 +132,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout (for the .tabularium manifest asset)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v5
