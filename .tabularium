@@ -1,9 +1,13 @@
 {
-  "$schema": "https://tabularis.dev/schemas/plugin-manifest.json",
-  "id": "dynamodb",
-  "name": "DynamoDB",
+  "name": "dynamodb",
   "version": "0.1.1",
+  "kind": "driver",
   "description": "Tabularis driver plugin for AWS DynamoDB",
+  "engine": "dynamodb",
+  "paradigms": [
+    "key-value",
+    "document"
+  ],
   "default_port": 8000,
   "executable": "dynamodb-plugin",
   "capabilities": {
@@ -42,7 +46,7 @@
     },
     {
       "name": "BOOLEAN",
-      "category": "boolean",
+      "category": "other",
       "requires_length": false,
       "requires_precision": false
     },
