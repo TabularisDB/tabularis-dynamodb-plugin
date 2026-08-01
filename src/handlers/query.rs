@@ -54,6 +54,38 @@ fn extract_limit(params: &Value) -> Option<i32> {
         .and_then(|l| i32::try_from(l).ok())
 }
 
+/// Extract the 1-based page number passed by the caller (defaults to 1).
+fn extract_page(params: &Value) -> u32 {
+    params
+        .get("page")
+        .and_then(|p| p.as_u64())
+        .and_then(|p| u32::try_from(p).ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(1)
+}
+
+/// Build the pagination object the Tabularis app deserializes into its
+/// `Pagination` struct, which requires `page`, `page_size`, `total_rows`
+/// (optional) and `has_more`. The opaque DynamoDB resume token rides along
+/// as `next_token` when present.
+fn build_pagination(
+    page: u32,
+    page_size: usize,
+    has_more: bool,
+    next_token: Option<String>,
+) -> Value {
+    let mut pg = json!({
+        "page": page,
+        "page_size": page_size,
+        "total_rows": Value::Null,
+        "has_more": has_more,
+    });
+    if let Some(token) = next_token {
+        pg["next_token"] = Value::String(token);
+    }
+    pg
+}
+
 /// Split a PartiQL body into individual statements on semicolons that sit
 /// outside of single-quoted string literals (#17). Trailing/empty segments are
 /// dropped, so `INSERT ...; UPDATE ...;` yields two statements.
@@ -579,6 +611,7 @@ fn items_to_response(
     items: Vec<std::collections::HashMap<String, Value>>,
     next_token: Option<String>,
     limit: Option<usize>,
+    page: u32,
     execution_time_ms: usize,
     consumed_capacity: Option<f64>,
 ) -> ExecuteQueryResponse {
@@ -614,13 +647,14 @@ fn items_to_response(
     };
 
     let has_more = next_token.is_some() || truncated_by_limit;
+    let page_size = limit.unwrap_or(rows.len());
 
     ExecuteQueryResponse {
         affected_rows: rows.len(),
         execution_time_ms,
         truncated: truncated_by_limit,
         has_more,
-        pagination: next_token.map(|t| json!({"next_token": t})),
+        pagination: Some(build_pagination(page, page_size, has_more, next_token)),
         consumed_capacity,
         warning: None,
         columns,
@@ -746,6 +780,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     let query = Query::from(query_str);
     let next_token = extract_next_token(params);
     let param_limit = extract_limit(params);
+    let page = extract_page(params);
     let allow_destructive = params
         .get("allow_destructive")
         .and_then(|v| v.as_bool())
@@ -851,6 +886,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.items,
                         res.next_token,
                         effective_limit,
+                        page,
                         started.elapsed().as_millis() as usize,
                         res.consumed_capacity,
                     )),
@@ -872,6 +908,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.items,
                         res.next_token,
                         None,
+                        page,
                         started.elapsed().as_millis() as usize,
                         res.consumed_capacity,
                     )),
@@ -925,6 +962,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.items,
                         res.next_token,
                         None,
+                        page,
                         started.elapsed().as_millis() as usize,
                         res.consumed_capacity,
                     )),
@@ -958,6 +996,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                         res.items,
                         res.next_token,
                         None,
+                        page,
                         started.elapsed().as_millis() as usize,
                         res.consumed_capacity,
                     )),
@@ -1012,6 +1051,43 @@ mod tests {
         let (stmt, lim) = strip_partiql_limit("SELECT * FROM users LIMIT 10");
         assert_eq!(stmt, "SELECT * FROM users");
         assert_eq!(lim, Some(10));
+    }
+
+    #[test]
+    fn pagination_contains_app_required_fields() {
+        // The Tabularis app deserializes `pagination` into a struct requiring
+        // `page`, `page_size`, `total_rows` and `has_more`; omitting any of
+        // them fails the whole response with "missing field ...".
+        let pg = build_pagination(3, 50, true, Some("tok".to_string()));
+        assert_eq!(pg["page"], 3);
+        assert_eq!(pg["page_size"], 50);
+        assert!(pg["total_rows"].is_null());
+        assert_eq!(pg["has_more"], true);
+        assert_eq!(pg["next_token"], "tok");
+
+        let pg = build_pagination(1, 100, false, None);
+        assert_eq!(pg["page"], 1);
+        assert_eq!(pg["has_more"], false);
+        assert!(pg.get("next_token").is_none());
+    }
+
+    #[test]
+    fn items_response_pagination_matches_app_contract() {
+        let mut item = std::collections::HashMap::new();
+        item.insert("id".to_string(), json!("abc"));
+        let resp = items_to_response(vec![item], None, None, 2, 5, None);
+        let pg = resp.pagination.expect("pagination must be present");
+        assert_eq!(pg["page"], 2);
+        assert_eq!(pg["page_size"], 1); // falls back to row count
+        assert_eq!(pg["has_more"], false);
+        assert!(pg["total_rows"].is_null());
+    }
+
+    #[test]
+    fn extract_page_defaults_to_one() {
+        assert_eq!(extract_page(&json!({})), 1);
+        assert_eq!(extract_page(&json!({"page": 0})), 1);
+        assert_eq!(extract_page(&json!({"page": 4})), 4);
     }
 
     #[test]
