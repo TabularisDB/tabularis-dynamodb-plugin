@@ -1,6 +1,6 @@
 {
   "name": "dynamodb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "kind": "driver",
   "description": "Tabularis driver plugin for AWS DynamoDB",
   "engine": "dynamodb",

@@ -1,6 +1,6 @@
 [package]
 name = "dynamodb-plugin"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Tabularis driver plugin for AWS DynamoDB"
 license = "Apache-2.0"
