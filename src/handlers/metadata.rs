@@ -1,5 +1,6 @@
 //! Schema metadata: tables, columns, indexes, foreign keys.
 
+use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
 
 use crate::error::ErrorCode;
@@ -7,6 +8,13 @@ use crate::handlers::connection;
 use crate::handlers::models::ColumnResponse;
 use crate::rpc::{error_response, ok_response};
 use crate::utils::extractor;
+
+/// Max in-flight DescribeTable calls while building the table list. On
+/// accounts with hundreds of tables a serial loop takes over a minute
+/// (~300ms per describe), which trips the GUI's connection timeout. Bounding
+/// concurrency keeps the full metadata (item count, size, status) without
+/// overwhelming the account's DescribeTable rate limit.
+const DESCRIBE_TABLE_CONCURRENCY: usize = 16;
 
 /// Returns the list of tables in DynamoDB with metadata.
 pub async fn get_tables(id: Value, params: &Value) -> Value {
@@ -17,31 +25,35 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
 
     match client.list_tables().await {
         Ok(table_names) => {
-            let mut results = Vec::new();
-            for name in table_names {
-                // Fetch full table metadata via describe_table
-                match client.describe_table(&name).await {
-                    Ok(desc) => {
-                        results.push(json!({
+            let mut results: Vec<Value> = stream::iter(table_names.into_iter().map(|name| {
+                let client = client.clone();
+                async move {
+                    match client.describe_table(&name).await {
+                        Ok(desc) => json!({
                             "name": name,
                             "comment": null,
                             "item_count": desc.item_count.unwrap_or(0),
                             "table_size_bytes": desc.table_size_bytes.unwrap_or(0),
                             "table_status": desc.table_status.unwrap_or_else(|| "ACTIVE".to_string()),
-                        }));
-                    }
-                    Err(_) => {
-                        // Fallback if describe_table fails
-                        results.push(json!({
+                        }),
+                        Err(_) => json!({
                             "name": name,
                             "comment": null,
                             "item_count": 0,
                             "table_size_bytes": 0,
                             "table_status": "UNKNOWN",
-                        }));
+                        }),
                     }
                 }
-            }
+            }))
+            .buffer_unordered(DESCRIBE_TABLE_CONCURRENCY)
+            .collect()
+            .await;
+            // buffer_unordered completes out of order; restore alphabetical
+            // ordering so the sidebar matches ListTables order.
+            results.sort_by(|a, b| {
+                a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            });
             ok_response(id, json!(results))
         }
         Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
