@@ -46,6 +46,12 @@
 
 ### Fixed
 
+- `execute_query` responses now include a complete `pagination` object with
+  the `page`, `page_size`, `total_rows` and `has_more` fields the Tabularis
+  app's `Pagination` struct requires. Previously only `next_token` was sent,
+  and the app rejected every query response with "missing field `page`".
+  The page number is read from the request's `page` param (default 1) and
+  `page_size` from `limit` (falling back to the returned row count).
 - `get_tables` no longer issues DescribeTable calls serially. On AWS accounts
   with hundreds of tables the serial loop took over a minute (~300ms per
   table), exceeding the GUI's connection timeout and failing the initial
