@@ -52,7 +52,10 @@ pub async fn get_tables(id: Value, params: &Value) -> Value {
             // buffer_unordered completes out of order; restore alphabetical
             // ordering so the sidebar matches ListTables order.
             results.sort_by(|a, b| {
-                a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
             });
             ok_response(id, json!(results))
         }
