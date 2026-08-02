@@ -43,3 +43,11 @@
 - `CODEOWNERS`, `.editorconfig`, and Dependabot config (cargo + GitHub Actions,
   weekly).
 - Expanded `.gitignore` with IDE and build directories.
+
+### Fixed
+
+- `get_tables` no longer issues DescribeTable calls serially. On AWS accounts
+  with hundreds of tables the serial loop took over a minute (~300ms per
+  table), exceeding the GUI's connection timeout and failing the initial
+  connection. Describes now run with bounded concurrency (16 in flight) and
+  results are re-sorted alphabetically to preserve ListTables ordering.
