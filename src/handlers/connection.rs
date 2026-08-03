@@ -111,8 +111,9 @@ fn normalized_params(params: &Value) -> Value {
     // but no region was supplied — the generic GUI form has no region field.
     // For AWS endpoints the signing region MUST match the endpoint's region
     // (otherwise InvalidSignatureException), so parse it from the hostname
-    // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) before falling back
-    // to us-east-1.
+    // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`). Next fallback is the
+    // plugin-level region setting (Settings → Plugins → DynamoDB), then
+    // us-east-1.
     if inner.contains_key("endpoint")
         && !inner.contains_key("region")
         && !inner.contains_key("profile")
@@ -121,8 +122,10 @@ fn normalized_params(params: &Value) -> Value {
             .get("endpoint")
             .and_then(|v| v.as_str())
             .and_then(region_from_endpoint)
-            .unwrap_or("us-east-1");
-        inner.insert("region".to_string(), Value::String(region.to_string()));
+            .map(str::to_string)
+            .or_else(crate::settings::default_region)
+            .unwrap_or_else(|| "us-east-1".to_string());
+        inner.insert("region".to_string(), Value::String(region));
     }
 
     out
@@ -286,9 +289,20 @@ mod tests {
 
     #[test]
     fn defaults_region_when_endpoint_present() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
         let params = json!({"params": {"host": "localhost", "port": "8000"}});
         let n = normalized_params(&params);
         assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn plugin_setting_region_used_for_non_aws_endpoint() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        crate::settings::apply_initialize(&json!({"settings": {"region": "ap-southeast-2"}}));
+        let params = json!({"params": {"endpoint": "http://localhost:8000"}});
+        let n = normalized_params(&params);
+        crate::settings::apply_initialize(&json!({}));
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
     }
 
     #[test]
@@ -331,6 +345,7 @@ mod tests {
 
     #[test]
     fn region_defaults_for_non_aws_endpoint() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
         let params = json!({"params": {"endpoint": "http://localhost:8000"}});
         let n = normalized_params(&params);
         assert_eq!(n["params"]["region"], "us-east-1");
