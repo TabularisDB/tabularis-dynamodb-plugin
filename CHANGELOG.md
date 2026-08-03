@@ -46,6 +46,16 @@
 
 ### Fixed
 
+- `normalized_params` built `http://host:443` for AWS endpoints, which fail at
+  the transport level (DynamoDB endpoints only speak TLS). HTTPS is now used
+  when the port is 443 or the host ends with `.amazonaws.com`.
+- `normalized_params` defaulted the signing region to `us-east-1` even when
+  the endpoint was another region's AWS endpoint, so every request failed
+  with `InvalidSignatureException`. The region is now parsed from the
+  endpoint hostname (`dynamodb.us-west-2.amazonaws.com` → `us-west-2`),
+  falling back to `us-east-1` only for non-AWS endpoints. Together these
+  restore connecting to real AWS DynamoDB via the generic GUI connection
+  form (host/port/username/password).
 - `execute_query` responses now include a complete `pagination` object with
   the `page`, `page_size`, `total_rows` and `has_more` fields the Tabularis
   app's `Pagination` struct requires. Previously only `next_token` was sent,
