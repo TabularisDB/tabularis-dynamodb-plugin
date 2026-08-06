@@ -3,6 +3,8 @@
 //! These mirror the `ConnectionParams` struct the host sends. Keep fields
 //! optional — different database types leave different fields blank.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,12 @@ pub struct ConnectionParams {
     pub session_token: Option<String>,
     pub profile: Option<String>,
     pub endpoint: Option<String>,
+    /// Opaque driver-specific connection fields, persisted and forwarded by
+    /// the host unchanged — it never inspects what a plugin stores here.
+    /// The DynamoDB region selector writes `region` into this map (see
+    /// `handlers::connection::normalized_params`). Non-string values are
+    /// dropped: the map contract is `String -> String`.
+    pub extra: HashMap<String, String>,
 }
 
 impl ConnectionParams {
@@ -33,6 +41,15 @@ impl ConnectionParams {
             .and_then(|o| o.get("port"))
             .and_then(Value::as_u64)
             .and_then(|p| u16::try_from(p).ok());
+        let extra = obj
+            .and_then(|o| o.get("extra"))
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Self {
             driver: get_str("driver"),
@@ -47,6 +64,7 @@ impl ConnectionParams {
             session_token: get_str("session_token"),
             profile: get_str("profile"),
             endpoint: get_str("endpoint"),
+            extra,
         }
     }
 }
@@ -76,7 +94,8 @@ mod tests {
             "secret_access_key": "SAK",
             "session_token": "token",
             "profile": "default",
-            "endpoint": "http://localhost:8000"
+            "endpoint": "http://localhost:8000",
+            "extra": {"region": "us-east-1", "note": "prod", "flag": true}
         });
 
         let params = ConnectionParams::from_value(&value);
@@ -93,6 +112,13 @@ mod tests {
         assert_eq!(params.session_token.as_deref(), Some("token"));
         assert_eq!(params.profile.as_deref(), Some("default"));
         assert_eq!(params.endpoint.as_deref(), Some("http://localhost:8000"));
+        assert_eq!(
+            params.extra.get("region").map(String::as_str),
+            Some("us-east-1")
+        );
+        assert_eq!(params.extra.get("note").map(String::as_str), Some("prod"));
+        // Non-string entries are dropped — the contract is String -> String.
+        assert!(!params.extra.contains_key("flag"));
     }
 
     #[test]
@@ -104,8 +130,17 @@ mod tests {
         assert!(params.host.is_none());
         assert!(params.port.is_none());
         assert!(params.database.is_none());
+        assert!(params.profile.is_none());
         assert!(params.region.is_none());
         assert!(params.access_key_id.is_none());
+        assert!(params.extra.is_empty());
+    }
+
+    #[test]
+    fn connection_params_from_value_ignores_non_object_extra() {
+        let value = json!({"extra": "not-an-object"});
+        let params = ConnectionParams::from_value(&value);
+        assert!(params.extra.is_empty());
     }
 
     #[test]

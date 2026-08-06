@@ -26,7 +26,10 @@ pub async fn handle_line(line: &str) -> Value {
     let params = request.get("params").cloned().unwrap_or(Value::Null);
 
     match method.as_str() {
-        "initialize" => ok_response(id, json!({"success": true})),
+        "initialize" => {
+            crate::settings::apply_initialize(&params);
+            ok_response(id, json!({"success": true}))
+        }
         "ping" => handlers::query::ping(id, &params).await,
         "test_connection" => handlers::query::test_connection(id, &params).await,
 

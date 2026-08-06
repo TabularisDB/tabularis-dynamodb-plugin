@@ -61,14 +61,16 @@ fn normalized_params(params: &Value) -> Value {
         });
         if let (Some(host), Some(port)) = (host, port) {
             if !host.is_empty() && !port.is_empty() {
-                let scheme = if host.starts_with("http://") || host.starts_with("https://") {
-                    ""
-                } else {
-                    "http://"
-                };
                 let host = host
                     .trim_start_matches("http://")
                     .trim_start_matches("https://");
+                // AWS endpoints only speak TLS; http://host:443 fails at the
+                // transport level. Use https for 443 and AWS hostnames.
+                let scheme = if port == "443" || host.ends_with(".amazonaws.com") {
+                    "https://"
+                } else {
+                    "http://"
+                };
                 inner.insert(
                     "endpoint".to_string(),
                     Value::String(format!("{scheme}{host}:{port}")),
@@ -107,14 +109,57 @@ fn normalized_params(params: &Value) -> Value {
     // The AWS SDK requires a region for request signing even when talking to a
     // local endpoint (e.g. DynamoDB Local). Default it when an endpoint is set
     // but no region was supplied — the generic GUI form has no region field.
+    //
+    // Precedence: explicit top-level `region` > opaque `extra["region"]`
+    // (connection-level extra fields, persisted and forwarded by the host
+    // unchanged — the DynamoDB connection UI's region selector lands here)
+    // > region parsed from an AWS endpoint hostname
+    // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) > plugin-level
+    // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
+    // Profile connections are exempt: they take their region from the AWS
+    // profile's own config.
     if inner.contains_key("endpoint")
         && !inner.contains_key("region")
         && !inner.contains_key("profile")
     {
-        inner.insert("region".to_string(), Value::String("us-east-1".to_string()));
+        let region = inner
+            .get("extra")
+            .and_then(|v| v.get("region"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                inner
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .and_then(region_from_endpoint)
+                    .map(str::to_string)
+            })
+            .or_else(crate::settings::default_region)
+            .unwrap_or_else(|| "us-east-1".to_string());
+        inner.insert("region".to_string(), Value::String(region));
     }
 
     out
+}
+
+/// Extract the AWS region from a standard DynamoDB endpoint hostname, e.g.
+/// `https://dynamodb.us-west-2.amazonaws.com:443` -> `us-west-2`.
+/// Returns None for non-AWS hosts (localhost, IP addresses, custom domains).
+fn region_from_endpoint(endpoint: &str) -> Option<&str> {
+    let host = endpoint
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split([':', '/'])
+        .next()?;
+    let rest = host.strip_prefix("dynamodb.")?;
+    let region = rest.strip_suffix(".amazonaws.com")?;
+    if region.is_empty() {
+        None
+    } else {
+        Some(region)
+    }
 }
 
 /// Build a DynamoDB client from a JSON-RPC params object, validating the
@@ -257,9 +302,76 @@ mod tests {
 
     #[test]
     fn defaults_region_when_endpoint_present() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
         let params = json!({"params": {"host": "localhost", "port": "8000"}});
         let n = normalized_params(&params);
         assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn plugin_setting_region_used_for_non_aws_endpoint() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        crate::settings::apply_initialize(&json!({"settings": {"region": "ap-southeast-2"}}));
+        let params = json!({"params": {"endpoint": "http://localhost:8000"}});
+        let n = normalized_params(&params);
+        crate::settings::apply_initialize(&json!({}));
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
+    }
+
+    #[test]
+    fn aws_host_on_443_uses_https() {
+        let params = json!({"params": {
+            "host": "dynamodb.us-west-2.amazonaws.com",
+            "port": 443,
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(
+            n["params"]["endpoint"],
+            "https://dynamodb.us-west-2.amazonaws.com:443"
+        );
+    }
+
+    #[test]
+    fn aws_hostname_implies_https_without_443() {
+        let params = json!({"params": {
+            "host": "dynamodb.eu-west-1.amazonaws.com",
+            "port": "8443",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(
+            n["params"]["endpoint"],
+            "https://dynamodb.eu-west-1.amazonaws.com:8443"
+        );
+    }
+
+    #[test]
+    fn region_parsed_from_aws_endpoint() {
+        // SigV4 signs with this region; it must match the endpoint's region
+        // or AWS rejects every request with InvalidSignatureException.
+        let params = json!({"params": {
+            "host": "dynamodb.us-west-2.amazonaws.com",
+            "port": 443,
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn region_defaults_for_non_aws_endpoint() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {"endpoint": "http://localhost:8000"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn explicit_region_wins_over_endpoint_parsing() {
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com",
+            "region": "eu-west-1",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
     }
 
     #[test]
@@ -268,6 +380,73 @@ mod tests {
             json!({"params": {"endpoint": "http://localhost:8000", "region": "eu-west-1"}});
         let n = normalized_params(&params);
         assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    // ── Opaque `extra` map (connection-level custom fields) ────────────
+
+    #[test]
+    fn extra_region_used_when_no_explicit_region() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"region": "ap-southeast-2"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
+    }
+
+    #[test]
+    fn explicit_region_wins_over_extra() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "region": "eu-west-1",
+            "extra": {"region": "ap-southeast-2"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn extra_region_wins_over_endpoint_parsing() {
+        // A user-chosen region beats the one inferred from the hostname.
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com",
+            "extra": {"region": "eu-west-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn blank_extra_region_falls_back_to_endpoint_parsing() {
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com",
+            "extra": {"region": "  "},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn non_string_extra_region_ignored() {
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com",
+            "extra": {"region": 42},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn extra_region_ignored_for_profile_connections() {
+        // Profile connections inherit their region from ~/.aws/config.
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "profile": "default",
+            "extra": {"region": "ap-southeast-2"},
+        }});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
     }
 
     #[tokio::test]
