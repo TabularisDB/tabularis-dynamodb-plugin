@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.1.4] — 2026-08-06
+
+### Fixed
+
+- `normalized_params` built `http://host:443` for AWS endpoints, which fail at
+  the transport level (DynamoDB endpoints only speak TLS). HTTPS is now used
+  when the port is 443 or the host ends with `.amazonaws.com`.
+- `normalized_params` defaulted the signing region to `us-east-1` even when
+  the endpoint was another region's AWS endpoint, so every request failed
+  with `InvalidSignatureException`. The signing region is now resolved in
+  order: explicit `region` param, `extra["region"]` connection field, region
+  parsed from an AWS endpoint hostname
+  (`dynamodb.us-west-2.amazonaws.com` → `us-west-2`), the plugin-level
+  default-region setting, and only then `us-east-1`. Together these restore
+  connecting to real AWS DynamoDB via the generic GUI connection form
+  (host/port/username/password).
+
+### Added
+
+- Plugin-level **Default AWS region** setting (Settings → Plugins →
+  DynamoDB), declared in `.tabularium` and delivered via the `initialize`
+  RPC. Used when a connection supplies neither an explicit region nor an
+  AWS endpoint hostname to parse one from.
+- `ConnectionParams` now parses the opaque `extra: HashMap<String, String>`
+  connection fields the host persists and forwards to drivers unchanged.
+  `extra["region"]` acts as the per-connection signing region when no
+  explicit `region` param is present — once the host ships the generic
+  connection-UI support ([TabularisDB/tabularis#596](https://github.com/TabularisDB/tabularis/pull/596)),
+  a region selector lives entirely in this plugin instead of the core app.
+
+## [0.1.3] — 2026-08-04
+
+### Fixed
+
+- `execute_query` responses now include a complete `pagination` object with
+  the `page`, `page_size`, `total_rows` and `has_more` fields the Tabularis
+  app's `Pagination` struct requires. Previously only `next_token` was sent,
+  and the app rejected every query response with "missing field `page`".
+  The page number is read from the request's `page` param (default 1) and
+  `page_size` from `limit` (falling back to the returned row count).
+- `get_tables` no longer issues DescribeTable calls serially. On AWS accounts
+  with hundreds of tables the serial loop took over a minute (~300ms per
+  table), exceeding the GUI's connection timeout and failing the initial
+  connection. Describes now run with bounded concurrency (16 in flight) and
+  results are re-sorted alphabetically to preserve ListTables ordering.
+
+## [0.1.2] — 2026-08-03
+
+### Changed
+
+- Bumped `base64` from 0.22.1 to 0.23.0.
+
+### Fixed
+
+- `manifest.json` updated to satisfy the Tabularium driver-kind contract.
+
+## [0.1.1] — 2026-08-02
+
+### Added
+
+- Migrated to the `.tabularium` manifest for the Tabularium registry.
+
+### Fixed
+
+- `get_indexes` now returns one row per indexed column to match the GUI
+  contract.
+
 ## [0.1.0] — 2026-07-22
 
 ### Added
@@ -43,42 +110,3 @@
 - `CODEOWNERS`, `.editorconfig`, and Dependabot config (cargo + GitHub Actions,
   weekly).
 - Expanded `.gitignore` with IDE and build directories.
-
-### Added
-
-- Plugin-level **Default AWS region** setting (Settings → Plugins →
-  DynamoDB), declared in `.tabularium` and delivered via the `initialize`
-  RPC. Used when a connection supplies neither an explicit region nor an
-  AWS endpoint hostname to parse one from.
-- `ConnectionParams` now parses the opaque `extra: HashMap<String, String>`
-  connection fields the host persists and forwards to drivers unchanged.
-  `extra["region"]` acts as the per-connection signing region when no
-  explicit `region` param is present — once the host ships the generic
-  connection-UI support ([TabularisDB/tabularis#593](https://github.com/TabularisDB/tabularis/pull/593)),
-  a region selector lives entirely in this plugin instead of the core app.
-
-### Fixed
-
-- `normalized_params` built `http://host:443` for AWS endpoints, which fail at
-  the transport level (DynamoDB endpoints only speak TLS). HTTPS is now used
-  when the port is 443 or the host ends with `.amazonaws.com`.
-- `normalized_params` defaulted the signing region to `us-east-1` even when
-  the endpoint was another region's AWS endpoint, so every request failed
-  with `InvalidSignatureException`. The signing region is now resolved in
-  order: explicit `region` param, `extra["region"]` connection field, region
-  parsed from an AWS endpoint hostname
-  (`dynamodb.us-west-2.amazonaws.com` → `us-west-2`), the plugin-level
-  default-region setting, and only then `us-east-1`. Together these restore
-  connecting to real AWS DynamoDB via the generic GUI connection form
-  (host/port/username/password).
-- `execute_query` responses now include a complete `pagination` object with
-  the `page`, `page_size`, `total_rows` and `has_more` fields the Tabularis
-  app's `Pagination` struct requires. Previously only `next_token` was sent,
-  and the app rejected every query response with "missing field `page`".
-  The page number is read from the request's `page` param (default 1) and
-  `page_size` from `limit` (falling back to the returned row count).
-- `get_tables` no longer issues DescribeTable calls serially. On AWS accounts
-  with hundreds of tables the serial loop took over a minute (~300ms per
-  table), exceeding the GUI's connection timeout and failing the initial
-  connection. Describes now run with bounded concurrency (16 in flight) and
-  results are re-sorted alphabetically to preserve ListTables ordering.
