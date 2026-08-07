@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5] — 2026-08-07
+
+### Added
+
+- Official Amazon DynamoDB brand icon (SVG) added to the plugin repository
+  and referenced via the `icon` field in `.tabularium`, following the same
+  pattern as the DuckDB plugin.
+
 ## [0.1.4] — 2026-08-06
 
 ### Fixed
