@@ -8,6 +8,12 @@
 //!
 //! PartiQL `LIMIT n` is not supported by DynamoDB's ExecuteStatement, so it is
 //! detected, stripped from the statement, and applied as a client-side row cap.
+//! PartiQL `ORDER BY` is only supported by DynamoDB when a WHERE clause pins
+//! the partition key and the ordered column is the sort key; any other form is
+//! rejected with a `ValidationException`. To let users sort any column from
+//! the GUI (e.g. clicking a column header on a table without a sort key), an
+//! `ORDER BY` clause is also stripped and applied client-side over a bounded
+//! Scan of the statement's result set.
 //! Pagination is threaded through both PartiQL (`next_token`) and the native
 //! APIs (opaque token derived from `LastEvaluatedKey`).
 
@@ -606,6 +612,37 @@ fn find_keyword(haystack: &str, keyword: &str) -> Option<usize> {
     None
 }
 
+/// Union of all keys across all items (DynamoDB is schemaless — each item
+/// can have different attributes). Preserves first-seen order.
+fn collect_columns(items: &[std::collections::HashMap<String, Value>]) -> Vec<String> {
+    let mut columns: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        for key in item.keys() {
+            if seen.insert(key.clone()) {
+                columns.push(key.clone());
+            }
+        }
+    }
+    columns
+}
+
+/// Project a set of items into flat rows against the given column order.
+fn items_to_rows(
+    items: &[std::collections::HashMap<String, Value>],
+    columns: &[String],
+) -> Vec<Vec<Value>> {
+    items
+        .iter()
+        .map(|item| {
+            columns
+                .iter()
+                .map(|col| item.get(col).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect()
+}
+
 /// Build the standard tabular response from a set of DynamoDB items.
 fn items_to_response(
     items: Vec<std::collections::HashMap<String, Value>>,
@@ -615,27 +652,8 @@ fn items_to_response(
     execution_time_ms: usize,
     consumed_capacity: Option<f64>,
 ) -> ExecuteQueryResponse {
-    // Union of all keys across all items (DynamoDB is schemaless — each item
-    // can have different attributes). Preserves first-seen order.
-    let mut columns: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for item in &items {
-        for key in item.keys() {
-            if seen.insert(key.clone()) {
-                columns.push(key.clone());
-            }
-        }
-    }
-
-    let mut rows: Vec<Vec<Value>> = items
-        .iter()
-        .map(|item| {
-            columns
-                .iter()
-                .map(|col| item.get(col).cloned().unwrap_or(Value::Null))
-                .collect()
-        })
-        .collect();
+    let columns = collect_columns(&items);
+    let mut rows = items_to_rows(&items, &columns);
 
     // Apply a client-side row cap when a LIMIT was requested.
     let truncated_by_limit = match limit {
@@ -660,6 +678,101 @@ fn items_to_response(
         columns,
         rows,
     }
+}
+
+/// Unwrap a derived-table wrapper the GUI emits when applying a LIMIT to a
+/// filtered browse:
+///
+///   SELECT * FROM (<inner>) AS limited_subset
+///
+/// DynamoDB PartiQL has no subquery support, so the wrapper is rejected by
+/// `ExecuteStatement` outright. The strippers (`strip_partiql_limit` /
+/// `strip_partiql_order_by`) also can't see into it — they would find the
+/// `ORDER BY`/`LIMIT` *inside* the parens and slice off the closing `)`,
+/// producing "Expected RIGHT_PAREN". Unwrap the wrapper first and run the
+/// normal pipeline on the inner statement.
+///
+/// Returns the inner statement when `body` is exactly
+/// `SELECT ... FROM (<inner>) [AS <alias>]` (single derived table, nothing
+/// else at top level); otherwise returns the original string unchanged.
+fn unwrap_derived_table(body: &str) -> String {
+    let trimmed = body.trim();
+    let lower = trimmed.to_lowercase();
+
+    // Must be a SELECT statement.
+    if !lower.starts_with("select ") {
+        return body.to_string();
+    }
+
+    // Find the top-level FROM. The select list of a derived-table wrapper is
+    // normally `*`, so the first FROM at a word boundary is the one.
+    let Some(from_pos) = find_keyword(&lower, "from") else {
+        return body.to_string();
+    };
+
+    // Skip whitespace after FROM; the next char must be '('.
+    let after_from = &trimmed[from_pos + 4..];
+    let lead_ws = after_from.len() - after_from.trim_start().len();
+    let after_ws = &after_from[lead_ws..];
+    if !after_ws.starts_with('(') {
+        return body.to_string();
+    }
+
+    // Balance parens from that '(', respecting single-quoted string literals
+    // (PartiQL uses single quotes for strings; double quotes are identifiers
+    // and don't contain parens in practice).
+    let open_abs = from_pos + 4 + lead_ws;
+    let bytes = trimmed.as_bytes();
+    let mut depth = 1i32;
+    let mut i = open_abs + 1;
+    let mut in_str = false;
+    while i < bytes.len() && depth > 0 {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\'' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'\'' => in_str = true,
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return body.to_string(); // unbalanced — leave untouched
+    }
+    // `i` now points just past the matching ')'.
+    let inner = &trimmed[open_abs + 1..i - 1];
+
+    // After the ')', only an optional `AS <alias>` (or bare alias) plus
+    // whitespace/semicolon is allowed. Anything else means the wrapper has
+    // more structure (e.g. a JOIN or outer WHERE) and we must not unwrap.
+    let tail = trimmed[i..].trim_end_matches(';').trim();
+    let ok = if tail.is_empty() {
+        true
+    } else {
+        // Strip an optional leading `AS ` (case-insensitive).
+        let alias_src = if tail.to_lowercase().starts_with("as ") {
+            &tail[3..]
+        } else {
+            tail
+        }
+        .trim();
+        // The alias must be a single identifier with nothing trailing.
+        match take_identifier(alias_src) {
+            Some(alias) => alias.len() == alias_src.len(),
+            None => false,
+        }
+    };
+    if !ok {
+        return body.to_string();
+    }
+
+    inner.trim().to_string()
 }
 
 /// Strip a trailing PartiQL `LIMIT <n>` clause (unsupported by
@@ -688,6 +801,214 @@ fn strip_partiql_limit(body: &str) -> (String, Option<usize>) {
     } else {
         (body.to_string(), None)
     }
+}
+
+/// A parsed `ORDER BY <col> [ASC|DESC]` clause stripped from a PartiQL SELECT.
+#[derive(Debug, Clone, PartialEq)]
+struct OrderBy {
+    column: String,
+    descending: bool,
+}
+
+/// Strip a trailing PartiQL `ORDER BY <col> [ASC|DESC]` clause and return the
+/// cleaned statement plus the parsed order.
+///
+/// Returns `(statement_without_order_by, Some(order))` when an ORDER BY was
+/// found at the tail of the statement (optionally followed by whitespace /
+/// semicolon), or `(original, None)` otherwise. Run after `strip_partiql_limit`
+/// so a trailing LIMIT has already been removed.
+///
+/// DynamoDB's ExecuteStatement only accepts `ORDER BY` when a WHERE clause
+/// pins the partition key and the ordered column is the sort key; every other
+/// form is rejected with a `ValidationException`. Stripping it here lets the
+/// caller apply the ordering client-side over a bounded result set.
+fn strip_partiql_order_by(body: &str) -> (String, Option<OrderBy>) {
+    let trimmed = body.trim_end().trim_end_matches(';').trim_end();
+    let lower = trimmed.to_lowercase();
+
+    let needle = " order by ";
+    let Some(pos) = lower.rfind(needle) else {
+        return (body.to_string(), None);
+    };
+
+    let after = trimmed[pos + needle.len()..].trim();
+    if after.is_empty() {
+        return (body.to_string(), None);
+    }
+
+    // `after` is `<col> [ASC|DESC]`. Split the column token from the optional
+    // direction on the first whitespace run.
+    let (col_part, dir_part) = match after.find(char::is_whitespace) {
+        Some(i) => (&after[..i], after[i..].trim()),
+        None => (after, ""),
+    };
+
+    let Some(column) = take_identifier(col_part) else {
+        return (body.to_string(), None);
+    };
+    let descending = dir_part.to_uppercase().starts_with("DESC");
+
+    let stmt = trimmed[..pos].trim_end().to_string();
+    (stmt, Some(OrderBy { column, descending }))
+}
+
+/// A total order over DynamoDB item values for client-side sorting.
+///
+/// - `Null` sorts last on ascending order (and first on descending, via the
+///   outer `reverse`), matching the common GUI expectation that missing
+///   values sink to the bottom.
+/// - numbers sort before strings; numbers compare by value (so `"30"` > `"9"`
+///   numerically, not lexically); strings compare lexically
+enum SortKey {
+    Null,
+    Num(f64),
+    Str(String),
+}
+
+impl PartialEq for SortKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for SortKey {}
+
+impl Ord for SortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        use SortKey::*;
+        match (self, other) {
+            (Null, Null) => Ordering::Equal,
+            (Null, _) => Ordering::Greater, // nulls last (ascending)
+            (_, Null) => Ordering::Less,
+            (Num(a), Num(b)) => a.total_cmp(b),
+            (Str(a), Str(b)) => a.cmp(b),
+            (Num(_), Str(_)) => Ordering::Less, // numbers before strings
+            (Str(_), Num(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for SortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Build a [`SortKey`] for an item's value, treating DynamoDB `N` attributes
+/// (serialised as JSON strings) as numeric.
+fn sort_key(value: Option<&Value>) -> SortKey {
+    match value {
+        None | Some(Value::Null) => SortKey::Null,
+        Some(v) => match as_numeric(v) {
+            Some(n) => SortKey::Num(n),
+            None => SortKey::Str(v.to_string()),
+        },
+    }
+}
+
+/// Sort a set of DynamoDB items in place by the given column. Items missing
+/// the column (or with null values) sink to the end on ascending order.
+fn sort_items(items: &mut [std::collections::HashMap<String, Value>], order: &OrderBy) {
+    items.sort_by(|a, b| {
+        let ka = sort_key(a.get(&order.column));
+        let kb = sort_key(b.get(&order.column));
+        let ord = ka.cmp(&kb);
+        if order.descending {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+}
+
+/// Hard cap on items pulled client-side for an `ORDER BY` sort. DynamoDB
+/// PartiQL `ExecuteStatement` is paged until this many rows are collected or
+/// the stream ends; the sort is then applied over the collected set. Matches
+/// `Client::MAX_SCAN_ITEMS` to keep bounded scans consistent across modes.
+const MAX_ORDER_BY_ROWS: usize = 1000;
+
+/// Execute a PartiQL SELECT whose `ORDER BY` clause has been stripped, by
+/// paging through `ExecuteStatement` results up to [`MAX_ORDER_BY_ROWS`],
+/// sorting client-side, then applying the row cap. A client-side sort is
+/// one-shot: no `next_token` is returned, so the GUI cannot page past it —
+/// the caller is expected to re-issue the full statement to advance.
+async fn execute_ordered_select(
+    client: &crate::dynamodb::client::Client,
+    statement: &str,
+    order: OrderBy,
+    limit: Option<usize>,
+    page: u32,
+    started: std::time::Instant,
+) -> Result<ExecuteQueryResponse, PluginError> {
+    let mut all_items: Vec<std::collections::HashMap<String, Value>> = Vec::new();
+    let mut token: Option<String> = None;
+    let mut total_capacity: f64 = 0.0;
+    let mut capped = false;
+
+    for _ in 0..10_000 {
+        let res = match token.as_deref() {
+            Some(t) => {
+                client
+                    .execute_statement_with_token(statement, Some(t))
+                    .await?
+            }
+            None => client.execute_statement(statement).await?,
+        };
+        total_capacity += res.consumed_capacity.unwrap_or(0.0);
+        all_items.extend(res.items);
+        if all_items.len() >= MAX_ORDER_BY_ROWS {
+            all_items.truncate(MAX_ORDER_BY_ROWS);
+            capped = true;
+            break;
+        }
+        match res.next_token {
+            Some(t) => token = Some(t),
+            None => break,
+        }
+    }
+
+    sort_items(&mut all_items, &order);
+
+    let columns = collect_columns(&all_items);
+    let mut rows = items_to_rows(&all_items, &columns);
+
+    let truncated_by_limit = match limit {
+        Some(l) if rows.len() > l => {
+            rows.truncate(l);
+            true
+        }
+        _ => false,
+    };
+
+    let has_more = truncated_by_limit || capped;
+    let page_size = limit.unwrap_or(rows.len());
+
+    let warning = if capped {
+        Some(format!(
+            "ORDER BY applied client-side over the first {MAX_ORDER_BY_ROWS} rows; \
+             results beyond that cap are not sorted. For server-side ordering, \
+             add a WHERE clause on the partition key and ORDER BY the sort key."
+        ))
+    } else {
+        None
+    };
+
+    Ok(ExecuteQueryResponse {
+        affected_rows: rows.len(),
+        execution_time_ms: started.elapsed().as_millis() as usize,
+        truncated: truncated_by_limit || capped,
+        has_more,
+        pagination: Some(build_pagination(page, page_size, has_more, None)),
+        consumed_capacity: if total_capacity > 0.0 {
+            Some(total_capacity)
+        } else {
+            None
+        },
+        warning,
+        columns,
+        rows,
+    })
 }
 
 /// Parsed request body for the native scan/query/get modes.
@@ -800,11 +1121,20 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     match query.mode {
         QueryMode::Partiql => {
+            // #66: the GUI wraps a filtered browse in a derived table when a
+            // LIMIT is applied — `SELECT * FROM (<base> <where> <order_by>
+            // <limit>) AS limited_subset`. DynamoDB PartiQL has no subquery
+            // support, so unwrap that wrapper first and run the normal
+            // pipeline on the inner statement. Without this, the LIMIT/ORDER
+            // BY strippers would find clauses *inside* the subquery and slice
+            // off its closing paren, producing "Expected RIGHT_PAREN".
+            let body = unwrap_derived_table(&query.body);
+
             // #17: multi-statement input routes through ExecuteTransaction.
             // Pagination (next_token) and LIMIT don't apply to transactions, so
             // only treat it as a transaction when there are 2+ statements and
             // no pagination token in play.
-            let statements = split_statements(&query.body);
+            let statements = split_statements(&body);
             if statements.len() > 1 && next_token.is_none() {
                 // #8: apply the destructive guard to every statement.
                 if !allow_destructive {
@@ -834,7 +1164,11 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             }
 
             // #20: strip an unsupported LIMIT clause and apply it client-side.
-            let (statement, inline_limit) = strip_partiql_limit(&query.body);
+            let (statement, inline_limit) = strip_partiql_limit(&body);
+            // #60: strip an unsupported ORDER BY clause and apply it client-side.
+            // Run after LIMIT stripping so `ORDER BY ... LIMIT n` leaves a clean
+            // base statement for the paged ExecuteStatement fetch.
+            let (statement, order_by) = strip_partiql_order_by(&statement);
 
             // #8: refuse destructive statements without explicit confirmation.
             if !allow_destructive {
@@ -869,6 +1203,30 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             }
 
             let effective_limit = inline_limit.or(param_limit.map(|l| l as usize));
+
+            // ORDER BY was stripped above. A client-side sort is only coherent
+            // over a fresh result set (a follow-up page would re-sort a slice of
+            // a different slice), so only intercept when no pagination token is
+            // in play; with a token, fall through to ExecuteStatement and let
+            // DynamoDB apply its own (server-side) ordering if the statement
+            // still carries one.
+            if let Some(order) = order_by {
+                if next_token.is_none() {
+                    return match execute_ordered_select(
+                        &client,
+                        &statement,
+                        order,
+                        effective_limit,
+                        page,
+                        started,
+                    )
+                    .await
+                    {
+                        Ok(resp) => ok_response(id, json!(resp)),
+                        Err(err) => error_response(id, ErrorCode::InternalError, &err.message),
+                    };
+                }
+            }
 
             let result = match next_token.as_deref() {
                 Some(token) => {
@@ -1110,6 +1468,293 @@ mod tests {
         let (stmt, lim) = strip_partiql_limit("SELECT limited_col FROM users");
         assert_eq!(stmt, "SELECT limited_col FROM users");
         assert_eq!(lim, None);
+    }
+
+    // ---- derived-table unwrapping (#66) ----
+
+    #[test]
+    fn unwrap_derived_table_extracts_inner() {
+        // The exact form the Tabularis GUI emits for a filtered browse with
+        // a LIMIT applied.
+        let body = "SELECT * FROM (SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10) AS limited_subset";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_without_alias() {
+        let body = "SELECT * FROM (SELECT * FROM \"users\" ORDER BY age DESC LIMIT 5)";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"users\" ORDER BY age DESC LIMIT 5"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_balances_nested_parens() {
+        // A function call inside the inner WHERE must not fool the balancer.
+        let body =
+            "SELECT * FROM (SELECT * FROM \"events\" WHERE \"ts\" > now() ORDER BY \"ts\") AS t";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"events\" WHERE \"ts\" > now() ORDER BY \"ts\""
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_respects_string_with_paren() {
+        let body = "SELECT * FROM (SELECT * FROM \"t\" WHERE x = 'a(b' ORDER BY x) AS s";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"t\" WHERE x = 'a(b' ORDER BY x"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_plain_select_untouched() {
+        let body = "SELECT * FROM \"users\" WHERE id > 5 ORDER BY age DESC";
+        assert_eq!(unwrap_derived_table(body), body);
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_join_untouched() {
+        // An outer JOIN means the wrapper has more than just a derived table;
+        // do not unwrap.
+        let body = "SELECT * FROM (SELECT * FROM \"a\") AS x JOIN \"b\" ON x.id = b.id";
+        assert_eq!(unwrap_derived_table(body), body);
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_non_select_untouched() {
+        assert_eq!(
+            unwrap_derived_table("INSERT INTO t VALUE {'id': '1'}"),
+            "INSERT INTO t VALUE {'id': '1'}"
+        );
+        assert_eq!(
+            unwrap_derived_table("DELETE FROM t WHERE id = '1'"),
+            "DELETE FROM t WHERE id = '1'"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_then_strip_pipeline() {
+        // End-to-end: the GUI wrapper feeds the LIMIT/ORDER BY strippers,
+        // which must operate on the inner, not the outer.
+        let body = "SELECT * FROM (SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10) AS limited_subset";
+        let inner = unwrap_derived_table(body);
+        let (stmt, lim) = strip_partiql_limit(&inner);
+        assert_eq!(
+            stmt,
+            "SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC"
+        );
+        assert_eq!(lim, Some(10));
+        let (stmt, order) = strip_partiql_order_by(&stmt);
+        assert_eq!(stmt, "SELECT * FROM \"production-venue\" WHERE id > 5");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "created_at".to_string(),
+                descending: true
+            })
+        );
+    }
+
+    // ---- ORDER BY stripping ----
+
+    #[test]
+    fn strip_order_by_removes_trailing_order_by() {
+        let (stmt, order) = strip_partiql_order_by("SELECT * FROM users ORDER BY age");
+        assert_eq!(stmt, "SELECT * FROM users");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "age".to_string(),
+                descending: false
+            })
+        );
+    }
+
+    #[test]
+    fn strip_order_by_handles_quoted_column_and_desc() {
+        let (stmt, order) = strip_partiql_order_by("SELECT * FROM \"users\" ORDER BY \"age\" DESC");
+        assert_eq!(stmt, "SELECT * FROM \"users\"");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "age".to_string(),
+                descending: true
+            })
+        );
+    }
+
+    #[test]
+    fn strip_order_by_case_insensitive_and_semicolon() {
+        let (stmt, order) = strip_partiql_order_by("select * from users order by id asc;");
+        assert_eq!(stmt, "select * from users");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "id".to_string(),
+                descending: false
+            })
+        );
+    }
+
+    #[test]
+    fn strip_order_by_preserves_where_clause() {
+        let (stmt, order) =
+            strip_partiql_order_by("SELECT * FROM events WHERE \"pk\" = 'p1' ORDER BY \"ts\" DESC");
+        assert_eq!(stmt, "SELECT * FROM events WHERE \"pk\" = 'p1'");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "ts".to_string(),
+                descending: true
+            })
+        );
+    }
+
+    #[test]
+    fn strip_order_by_no_clause_present() {
+        let (stmt, order) = strip_partiql_order_by("SELECT * FROM users");
+        assert_eq!(stmt, "SELECT * FROM users");
+        assert_eq!(order, None);
+    }
+
+    #[test]
+    fn strip_order_by_does_not_match_substring() {
+        // "order_by_col" should not be mistaken for an ORDER BY clause.
+        let (stmt, order) = strip_partiql_order_by("SELECT order_by_col FROM users");
+        assert_eq!(stmt, "SELECT order_by_col FROM users");
+        assert_eq!(order, None);
+    }
+
+    #[test]
+    fn strip_limit_then_order_by_chains_cleanly() {
+        // The natural GUI pattern: ORDER BY ... LIMIT n. strip_partiql_limit
+        // runs first, leaving ORDER BY at the tail for strip_partiql_order_by.
+        let (stmt, lim) = strip_partiql_limit("SELECT * FROM users ORDER BY age LIMIT 5");
+        assert_eq!(stmt, "SELECT * FROM users ORDER BY age");
+        assert_eq!(lim, Some(5));
+        let (stmt, order) = strip_partiql_order_by(&stmt);
+        assert_eq!(stmt, "SELECT * FROM users");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "age".to_string(),
+                descending: false
+            })
+        );
+    }
+
+    // ---- client-side sorting ----
+
+    fn item(col: &str, v: Value) -> std::collections::HashMap<String, Value> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(col.to_string(), v);
+        m
+    }
+
+    #[test]
+    fn sort_items_numeric_ascending() {
+        // DynamoDB N attributes arrive as JSON strings; sort must be numeric,
+        // not lexical (so "30" > "9", not "30" < "9").
+        let mut items = vec![
+            item("age", json!("30")),
+            item("age", json!("9")),
+            item("age", json!("100")),
+        ];
+        sort_items(
+            &mut items,
+            &OrderBy {
+                column: "age".to_string(),
+                descending: false,
+            },
+        );
+        let ages: Vec<&Value> = items.iter().map(|m| m.get("age").unwrap()).collect();
+        assert_eq!(ages, vec![&json!("9"), &json!("30"), &json!("100")]);
+    }
+
+    #[test]
+    fn sort_items_descending_reverses() {
+        let mut items = vec![
+            item("age", json!("9")),
+            item("age", json!("100")),
+            item("age", json!("30")),
+        ];
+        sort_items(
+            &mut items,
+            &OrderBy {
+                column: "age".to_string(),
+                descending: true,
+            },
+        );
+        let ages: Vec<&Value> = items.iter().map(|m| m.get("age").unwrap()).collect();
+        assert_eq!(ages, vec![&json!("100"), &json!("30"), &json!("9")]);
+    }
+
+    #[test]
+    fn sort_items_nulls_sink_last_on_ascending() {
+        let mut items = vec![
+            item("age", json!("9")),
+            item("age", Value::Null),
+            item("age", json!("30")),
+            std::collections::HashMap::new(), // missing the column entirely
+        ];
+        sort_items(
+            &mut items,
+            &OrderBy {
+                column: "age".to_string(),
+                descending: false,
+            },
+        );
+        let ages: Vec<Option<&Value>> = items.iter().map(|m| m.get("age")).collect();
+        // Two real values first (ascending), then the two null/missing last.
+        assert_eq!(ages[0], Some(&json!("9")));
+        assert_eq!(ages[1], Some(&json!("30")));
+        assert!(matches!(ages[2], Some(Value::Null) | None));
+        assert!(matches!(ages[3], Some(Value::Null) | None));
+    }
+
+    #[test]
+    fn sort_items_string_column_lexical() {
+        let mut items = vec![
+            item("name", json!("Carol")),
+            item("name", json!("alice")),
+            item("name", json!("Bob")),
+        ];
+        sort_items(
+            &mut items,
+            &OrderBy {
+                column: "name".to_string(),
+                descending: false,
+            },
+        );
+        let names: Vec<&Value> = items.iter().map(|m| m.get("name").unwrap()).collect();
+        // Uppercase letters sort before lowercase in default lexical order.
+        assert_eq!(names, vec![&json!("Bob"), &json!("Carol"), &json!("alice")]);
+    }
+
+    #[test]
+    fn sort_items_accepts_json_numbers_too() {
+        // A non-DynamoDB-source value (e.g. a JSON number from a synthetic row)
+        // must also sort numerically.
+        let mut items = vec![
+            item("n", json!(30)),
+            item("n", json!(9)),
+            item("n", json!(100)),
+        ];
+        sort_items(
+            &mut items,
+            &OrderBy {
+                column: "n".to_string(),
+                descending: false,
+            },
+        );
+        let ns: Vec<&Value> = items.iter().map(|m| m.get("n").unwrap()).collect();
+        assert_eq!(ns, vec![&json!(9), &json!(30), &json!(100)]);
     }
 
     #[test]

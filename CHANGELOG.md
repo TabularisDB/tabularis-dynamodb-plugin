@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.1.6] — 2026-08-24
+
+### Fixed
+
+- `ORDER BY` clauses in PartiQL `SELECT` statements no longer fail with
+  `ValidationException: Must have WHERE clause in the statement when using
+  ORDER BY clause.` DynamoDB's `ExecuteStatement` only accepts `ORDER BY`
+  when a `WHERE` pins the partition key and the ordered column is the sort
+  key, so any other form (e.g. sorting a table without a sort key, or
+  ordering by a non-key column — exactly what the GUI emits when a column
+  header is clicked) was rejected outright. The clause is now detected,
+  stripped from the statement, and re-applied client-side over a bounded
+  paged read of the result set (`ORDER BY ... LIMIT n` chains correctly:
+  `LIMIT` is stripped first, then `ORDER BY`). A 1000-row cap keeps the
+  client-side sort bounded; when the cap is hit a warning is returned
+  explaining how to get server-side ordering instead.
+- Filtered browses with a LIMIT no longer fail with `ValidationException:
+  Statement wasn't well formed, can't be processed: Expected RIGHT_PAREN`.
+  The GUI wraps such browses in a derived table —
+  `SELECT * FROM (<base> <where> <order_by> <limit>) AS limited_subset` —
+  which DynamoDB PartiQL does not support. The wrapper is now unwrapped
+  before the LIMIT/ORDER BY strippers run, so they operate on the inner
+  statement instead of slicing into the subquery and dropping its closing
+  paren. A wrapper is only unwrapped when it is a single derived table with
+  nothing else at the top level (a following JOIN or outer WHERE is left
+  untouched).
+
 ## [0.1.5] — 2026-08-07
 
 ### Added
