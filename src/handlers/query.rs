@@ -680,6 +680,101 @@ fn items_to_response(
     }
 }
 
+/// Unwrap a derived-table wrapper the GUI emits when applying a LIMIT to a
+/// filtered browse:
+///
+///   SELECT * FROM (<inner>) AS limited_subset
+///
+/// DynamoDB PartiQL has no subquery support, so the wrapper is rejected by
+/// `ExecuteStatement` outright. The strippers (`strip_partiql_limit` /
+/// `strip_partiql_order_by`) also can't see into it — they would find the
+/// `ORDER BY`/`LIMIT` *inside* the parens and slice off the closing `)`,
+/// producing "Expected RIGHT_PAREN". Unwrap the wrapper first and run the
+/// normal pipeline on the inner statement.
+///
+/// Returns the inner statement when `body` is exactly
+/// `SELECT ... FROM (<inner>) [AS <alias>]` (single derived table, nothing
+/// else at top level); otherwise returns the original string unchanged.
+fn unwrap_derived_table(body: &str) -> String {
+    let trimmed = body.trim();
+    let lower = trimmed.to_lowercase();
+
+    // Must be a SELECT statement.
+    if !lower.starts_with("select ") {
+        return body.to_string();
+    }
+
+    // Find the top-level FROM. The select list of a derived-table wrapper is
+    // normally `*`, so the first FROM at a word boundary is the one.
+    let Some(from_pos) = find_keyword(&lower, "from") else {
+        return body.to_string();
+    };
+
+    // Skip whitespace after FROM; the next char must be '('.
+    let after_from = &trimmed[from_pos + 4..];
+    let lead_ws = after_from.len() - after_from.trim_start().len();
+    let after_ws = &after_from[lead_ws..];
+    if !after_ws.starts_with('(') {
+        return body.to_string();
+    }
+
+    // Balance parens from that '(', respecting single-quoted string literals
+    // (PartiQL uses single quotes for strings; double quotes are identifiers
+    // and don't contain parens in practice).
+    let open_abs = from_pos + 4 + lead_ws;
+    let bytes = trimmed.as_bytes();
+    let mut depth = 1i32;
+    let mut i = open_abs + 1;
+    let mut in_str = false;
+    while i < bytes.len() && depth > 0 {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\'' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'\'' => in_str = true,
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return body.to_string(); // unbalanced — leave untouched
+    }
+    // `i` now points just past the matching ')'.
+    let inner = &trimmed[open_abs + 1..i - 1];
+
+    // After the ')', only an optional `AS <alias>` (or bare alias) plus
+    // whitespace/semicolon is allowed. Anything else means the wrapper has
+    // more structure (e.g. a JOIN or outer WHERE) and we must not unwrap.
+    let tail = trimmed[i..].trim_end_matches(';').trim();
+    let ok = if tail.is_empty() {
+        true
+    } else {
+        // Strip an optional leading `AS ` (case-insensitive).
+        let alias_src = if tail.to_lowercase().starts_with("as ") {
+            &tail[3..]
+        } else {
+            tail
+        }
+        .trim();
+        // The alias must be a single identifier with nothing trailing.
+        match take_identifier(alias_src) {
+            Some(alias) => alias.len() == alias_src.len(),
+            None => false,
+        }
+    };
+    if !ok {
+        return body.to_string();
+    }
+
+    inner.trim().to_string()
+}
+
 /// Strip a trailing PartiQL `LIMIT <n>` clause (unsupported by
 /// ExecuteStatement) and return the cleaned statement plus the cap.
 ///
@@ -1026,11 +1121,20 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     match query.mode {
         QueryMode::Partiql => {
+            // #66: the GUI wraps a filtered browse in a derived table when a
+            // LIMIT is applied — `SELECT * FROM (<base> <where> <order_by>
+            // <limit>) AS limited_subset`. DynamoDB PartiQL has no subquery
+            // support, so unwrap that wrapper first and run the normal
+            // pipeline on the inner statement. Without this, the LIMIT/ORDER
+            // BY strippers would find clauses *inside* the subquery and slice
+            // off its closing paren, producing "Expected RIGHT_PAREN".
+            let body = unwrap_derived_table(&query.body);
+
             // #17: multi-statement input routes through ExecuteTransaction.
             // Pagination (next_token) and LIMIT don't apply to transactions, so
             // only treat it as a transaction when there are 2+ statements and
             // no pagination token in play.
-            let statements = split_statements(&query.body);
+            let statements = split_statements(&body);
             if statements.len() > 1 && next_token.is_none() {
                 // #8: apply the destructive guard to every statement.
                 if !allow_destructive {
@@ -1060,7 +1164,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             }
 
             // #20: strip an unsupported LIMIT clause and apply it client-side.
-            let (statement, inline_limit) = strip_partiql_limit(&query.body);
+            let (statement, inline_limit) = strip_partiql_limit(&body);
             // #60: strip an unsupported ORDER BY clause and apply it client-side.
             // Run after LIMIT stripping so `ORDER BY ... LIMIT n` leaves a clean
             // base statement for the paged ExecuteStatement fetch.
@@ -1364,6 +1468,97 @@ mod tests {
         let (stmt, lim) = strip_partiql_limit("SELECT limited_col FROM users");
         assert_eq!(stmt, "SELECT limited_col FROM users");
         assert_eq!(lim, None);
+    }
+
+    // ---- derived-table unwrapping (#66) ----
+
+    #[test]
+    fn unwrap_derived_table_extracts_inner() {
+        // The exact form the Tabularis GUI emits for a filtered browse with
+        // a LIMIT applied.
+        let body = "SELECT * FROM (SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10) AS limited_subset";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_without_alias() {
+        let body = "SELECT * FROM (SELECT * FROM \"users\" ORDER BY age DESC LIMIT 5)";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"users\" ORDER BY age DESC LIMIT 5"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_balances_nested_parens() {
+        // A function call inside the inner WHERE must not fool the balancer.
+        let body =
+            "SELECT * FROM (SELECT * FROM \"events\" WHERE \"ts\" > now() ORDER BY \"ts\") AS t";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"events\" WHERE \"ts\" > now() ORDER BY \"ts\""
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_respects_string_with_paren() {
+        let body = "SELECT * FROM (SELECT * FROM \"t\" WHERE x = 'a(b' ORDER BY x) AS s";
+        assert_eq!(
+            unwrap_derived_table(body),
+            "SELECT * FROM \"t\" WHERE x = 'a(b' ORDER BY x"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_plain_select_untouched() {
+        let body = "SELECT * FROM \"users\" WHERE id > 5 ORDER BY age DESC";
+        assert_eq!(unwrap_derived_table(body), body);
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_join_untouched() {
+        // An outer JOIN means the wrapper has more than just a derived table;
+        // do not unwrap.
+        let body = "SELECT * FROM (SELECT * FROM \"a\") AS x JOIN \"b\" ON x.id = b.id";
+        assert_eq!(unwrap_derived_table(body), body);
+    }
+
+    #[test]
+    fn unwrap_derived_table_leaves_non_select_untouched() {
+        assert_eq!(
+            unwrap_derived_table("INSERT INTO t VALUE {'id': '1'}"),
+            "INSERT INTO t VALUE {'id': '1'}"
+        );
+        assert_eq!(
+            unwrap_derived_table("DELETE FROM t WHERE id = '1'"),
+            "DELETE FROM t WHERE id = '1'"
+        );
+    }
+
+    #[test]
+    fn unwrap_derived_table_then_strip_pipeline() {
+        // End-to-end: the GUI wrapper feeds the LIMIT/ORDER BY strippers,
+        // which must operate on the inner, not the outer.
+        let body = "SELECT * FROM (SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC LIMIT 10) AS limited_subset";
+        let inner = unwrap_derived_table(body);
+        let (stmt, lim) = strip_partiql_limit(&inner);
+        assert_eq!(
+            stmt,
+            "SELECT * FROM \"production-venue\" WHERE id > 5 ORDER BY created_at DESC"
+        );
+        assert_eq!(lim, Some(10));
+        let (stmt, order) = strip_partiql_order_by(&stmt);
+        assert_eq!(stmt, "SELECT * FROM \"production-venue\" WHERE id > 5");
+        assert_eq!(
+            order,
+            Some(OrderBy {
+                column: "created_at".to_string(),
+                descending: true
+            })
+        );
     }
 
     // ---- ORDER BY stripping ----
