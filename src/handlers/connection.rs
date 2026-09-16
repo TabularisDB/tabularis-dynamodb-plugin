@@ -21,6 +21,19 @@ fn read_param<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// True when `key` is present and holds a non-blank string.
+///
+/// Absent, `null` and `""` are all "not supplied" as far as the SDK is
+/// concerned (they normalise away in [`read_param`]), so the normalisation
+/// below treats them identically instead of letting `null`/`""` shadow a
+/// fallback.
+fn has_non_blank(inner: &serde_json::Map<String, Value>, key: &str) -> bool {
+    inner
+        .get(key)
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 /// Normalise connection params so that TabularisDB's generic connection form
 /// (HOST / PORT / USERNAME / PASSWORD) maps onto the AWS-shaped fields the
 /// DynamoDB driver actually consumes.
@@ -107,8 +120,11 @@ fn normalized_params(params: &Value) -> Value {
     }
 
     // The AWS SDK requires a region for request signing even when talking to a
-    // local endpoint (e.g. DynamoDB Local). Default it when an endpoint is set
-    // but no region was supplied — the generic GUI form has no region field.
+    // local endpoint (e.g. DynamoDB Local). Default it whenever the connection
+    // has something to sign with — an endpoint (DynamoDB Local / custom
+    // endpoint) or an explicit access-key/secret pair — since the generic GUI
+    // form has no region field and a keys-only connection has no endpoint to
+    // parse a region out of (#71).
     //
     // Precedence: explicit top-level `region` > opaque `extra["region"]`
     // (connection-level extra fields, persisted and forwarded by the host
@@ -118,9 +134,13 @@ fn normalized_params(params: &Value) -> Value {
     // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
     // Profile connections are exempt: they take their region from the AWS
     // profile's own config.
-    if inner.contains_key("endpoint")
-        && !inner.contains_key("region")
-        && !inner.contains_key("profile")
+    let has_endpoint = has_non_blank(inner, "endpoint");
+    let has_creds =
+        has_non_blank(inner, "access_key_id") && has_non_blank(inner, "secret_access_key");
+
+    if (has_endpoint || has_creds)
+        && !has_non_blank(inner, "region")
+        && !has_non_blank(inner, "profile")
     {
         let region = inner
             .get("extra")
@@ -463,6 +483,125 @@ mod tests {
             Err(e) => assert!(
                 !e.message.contains("connection params required"),
                 "generic form should satisfy validation, got: {}",
+                e.message
+            ),
+        }
+    }
+
+    // ── Keys-only connections (no host/port) — issue #71 ───────────────
+
+    #[test]
+    fn keys_only_defaults_region() {
+        // Credentials but no endpoint: the only thing the request needs beyond
+        // the keys is a signing region, and there is no endpoint hostname to
+        // parse one from — so the fallback chain must run anyway.
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {"username": "AKIA", "password": "secret"}});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+        assert!(n["params"].get("endpoint").is_none());
+    }
+
+    #[test]
+    fn keys_only_uses_plugin_default_region() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        crate::settings::apply_initialize(&json!({"settings": {"region": "ap-southeast-2"}}));
+        let params = json!({"params": {"username": "AKIA", "password": "secret"}});
+        let n = normalized_params(&params);
+        crate::settings::apply_initialize(&json!({}));
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
+    }
+
+    #[test]
+    fn keys_only_uses_extra_region() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "username": "AKIA",
+            "password": "secret",
+            "extra": {"region": "eu-west-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn keys_only_without_secret_gets_no_region() {
+        // Half a credential pair is not a signing configuration, so there is
+        // nothing to default a region for — the request is rejected anyway.
+        let params = json!({"params": {"username": "AKIA"}});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
+    }
+
+    #[test]
+    fn null_region_does_not_shadow_the_default() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "username": "AKIA",
+            "password": "secret",
+            "region": null,
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn blank_region_does_not_shadow_the_default() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "region": "   ",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn blank_endpoint_counts_as_absent() {
+        // The GUI sends empty host/port as blank strings rather than omitting
+        // them; an empty endpoint must not suppress the region fallback.
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "endpoint": "",
+            "username": "AKIA",
+            "password": "secret",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn blank_profile_does_not_suppress_region_default() {
+        // A blank profile is "not supplied" (read_param drops it), so it must
+        // not exempt the connection from region defaulting.
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "username": "AKIA",
+            "password": "secret",
+            "profile": "",
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-east-1");
+    }
+
+    #[test]
+    fn no_endpoint_and_no_creds_leaves_region_unset() {
+        // Nothing to sign with -> no region invented; validation rejects it.
+        let params = json!({"params": {"host": "localhost"}});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
+    }
+
+    #[tokio::test]
+    async fn credentials_only_is_accepted() {
+        // Access key + secret with no host/port/endpoint — the plugin resolves
+        // the endpoint from the region (AWS default endpoint).
+        let params = json!({"params": {"username": "AKIA", "password": "secret"}});
+        match build_client(&params).await {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.message.contains("connection params required"),
+                "credentials-only connection should satisfy validation, got: {}",
                 e.message
             ),
         }
