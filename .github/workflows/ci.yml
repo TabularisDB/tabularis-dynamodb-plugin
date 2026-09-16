@@ -27,3 +27,30 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  ui:
+    name: UI extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: ui
+        run: npm run typecheck
+
+      # Builds ui/dist/index.js (what the plugin folder ships) and then runs
+      # the test suite against the bundle the host would actually evaluate.
+      - name: Build and test the bundle
+        working-directory: ui
+        run: npm test

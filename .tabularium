@@ -58,6 +58,14 @@
       ]
     }
   ],
+  "ui_extensions": [
+    {
+      "slot": "connection-modal.extra_fields",
+      "module": "ui/dist/index.js",
+      "order": 10,
+      "driver": "dynamodb"
+    }
+  ],
   "capabilities": {
     "schemas": false,
     "views": false,
