@@ -37,7 +37,7 @@ This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local inst
 
 ## Features
 
-- **Connection** — Connect using explicit AWS credentials (Access Key/Secret Key), AWS profiles, environment variables, or IAM roles. Supports AWS regions and custom endpoints for DynamoDB Local.
+- **Connection** — Connect using explicit AWS credentials (Access Key/Secret Key), an AWS region selector, AWS profiles, environment variables, or IAM roles. Supports AWS regions and custom endpoints for DynamoDB Local. See [Connection Configuration](#connection-configuration) for which value goes in which field.
 - **Table Browsing** — List all tables in the connected region and inspect their schemas.
 - **Schema Inspection** — View table attribute definitions, key schema (partition key and sort key), and data types.
 - **Index Inspection** — List global secondary indexes (GSI) and local secondary indexes (LSI) for each table.
@@ -49,17 +49,50 @@ This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local inst
 
 ## Connection Configuration
 
-The plugin supports multiple authentication methods, resolved in the following order:
+Tabularis renders its generic connection form (HOST / PORT / USERNAME / PASSWORD) for this plugin, and the plugin maps those fields onto AWS ones. There is no AWS-specific field in the host form yet, so this is what to type:
 
-1. **Explicit credentials** — Pass `access_key_id`, `secret_access_key`, and `region` directly in the connection parameters.
-2. **Session token** — Add `session_token` for temporary credentials (e.g., from AWS STS).
-3. **AWS profile** — Specify `profile` to use a profile from `~/.aws/credentials`.
-4. **Environment variables** — The plugin reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` from the environment.
-5. **IMDS** — Automatically uses EC2 instance metadata or ECS task roles when running on AWS infrastructure.
+| Tabularis field | Value for AWS | Value for DynamoDB Local |
+|---|---|---|
+| **HOST** | `dynamodb.<region>.amazonaws.com`, e.g. `dynamodb.us-east-1.amazonaws.com` | `localhost` |
+| **PORT** | `443` | `8000` |
+| **USERNAME** | your AWS Access Key ID | any non-empty string |
+| **PASSWORD** | your AWS Secret Access Key | any non-empty string |
 
-For DynamoDB Local, set `endpoint` to `http://localhost:8000` to override the default AWS endpoint.
+Host and port are only used to derive the endpoint: the region is parsed out of the hostname, port `443` (or any `*.amazonaws.com` host) switches it to `https://`, and any other host is treated as a plain `http://` endpoint. HOST and PORT may be left empty when an access key and secret are supplied — the request is then signed against the default endpoint for the resolved region.
 
-### Connection Parameters
+### Region resolution
+
+The signing region is resolved in this order (first match wins):
+
+| # | Source | How to set it |
+|---|---|---|
+| 1 | explicit `region` parameter | raw JSON-RPC / `test_plugin` REPL |
+| 2 | per-connection region | region selector in the connection modal (stored in the connection's `extra` map) |
+| 3 | endpoint hostname | `dynamodb.us-west-2.amazonaws.com` → `us-west-2` |
+| 4 | plugin default region | **Settings → Plugins → DynamoDB → Default AWS region** |
+| 5 | fallback | `us-east-1` |
+
+SigV4 signing requires a region and AWS rejects a request whose signing region does not match the endpoint's region (`InvalidSignatureException`), so let the region be derived from the hostname, or set it explicitly. Profile-based connections are exempt: they take their region from `~/.aws/config`.
+
+### Authentication methods
+
+Credentials are resolved in the following order:
+
+1. **Explicit credentials** — the Access Key ID / Secret Access Key entered in USERNAME / PASSWORD (mapped to `access_key_id` / `secret_access_key`).
+2. **Session token** — `session_token` for temporary credentials (e.g. from AWS STS).
+3. **AWS profile** — `profile`, pointing at a named profile in `~/.aws/credentials`.
+4. **Environment variables** — the plugin reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` from the environment.
+5. **IMDS** — automatically uses EC2 instance metadata or ECS task roles when running on AWS infrastructure.
+
+For DynamoDB Local, point HOST/PORT at it (`localhost` / `8000`) and give USERNAME/PASSWORD any non-empty value — the plugin passes the endpoint through as-is instead of signing against real AWS:
+
+```bash
+docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb
+```
+
+### Raw JSON-RPC parameters
+
+These are the internal parameter names the plugin reads. They are what the fields above map onto, and are only ever typed directly when driving the plugin over JSON-RPC (see [Manual JSON-RPC test via shell](#manual-json-rpc-test-via-shell)).
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
@@ -69,6 +102,8 @@ For DynamoDB Local, set `endpoint` to `http://localhost:8000` to override the de
 | `session_token` | Temporary session token (for STS) | No |
 | `profile` | AWS profile name | No |
 | `endpoint` | Custom endpoint URL (for DynamoDB Local) | No |
+
+`region` can also be supplied through the connection-level `extra` map (`{"extra": {"region": "us-west-2"}}`) — that is where the connection modal's region selector stores it. Profile-based connections are exempt from the region fallbacks above.
 
 ## Supported DynamoDB Data Types
 
