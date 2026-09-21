@@ -64,7 +64,7 @@ fmt:
 build-ui:
 	@if [ -f ui/package.json ]; then \
 		echo "Building UI extension..."; \
-		(cd ui && pnpm install && pnpm run build); \
+		(cd ui && npm install --no-audit --no-fund && npm run build); \
 	fi
 
 [windows]
@@ -75,13 +75,44 @@ build-ui:
 		Write-Host "Building UI extension..."
 		Push-Location ui
 		try {
-			pnpm i
+			npm install --no-audit --no-fund
 			if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-			pnpm run build
+			npm run build
 			if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 		} finally {
 			Pop-Location
 		}
+	}
+
+# Typecheck + test the UI extension (builds the bundle first)
+[unix]
+test-ui:
+	@if [ -f ui/package.json ]; then \
+		echo "Testing UI extension..."; \
+		(cd ui && npm install --no-audit --no-fund && npm run typecheck && npm test); \
+	else \
+		echo "No ui/package.json — nothing to test."; \
+	fi
+
+[windows]
+test-ui:
+	#!pwsh
+
+	if (Test-Path ui/package.json) {
+		Write-Host "Testing UI extension..."
+		Push-Location ui
+		try {
+			npm install --no-audit --no-fund
+			if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+			npm run typecheck
+			if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+			npm test
+			if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+		} finally {
+			Pop-Location
+		}
+	} else {
+		Write-Host "No ui/package.json — nothing to test."
 	}
 
 # Build + copy binary and manifest into the Tabularis plugin folder

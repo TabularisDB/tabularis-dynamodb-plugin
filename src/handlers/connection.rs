@@ -119,6 +119,34 @@ fn normalized_params(params: &Value) -> Value {
         }
     }
 
+    // Opaque `extra` connection fields (the connection-modal.extra_fields slot
+    // in the plugin's `ui/` bundle) -> AWS-shaped params. Only the fields the
+    // generic form has no home for live here: `region` is consumed further
+    // down, profile and session token are promoted here. Explicit top-level
+    // values always win, and a blank value means "cleared" (the slot's
+    // `setExtraField(key, "")` semantics), so it must not shadow a real one.
+    for key in ["profile", "session_token"] {
+        // An explicit value wins — but only if it isn't blank, since blanks
+        // are dropped by `read_param` further down and would otherwise leave
+        // the connection with neither the explicit nor the extra value.
+        let explicit = inner
+            .get(key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if explicit {
+            continue;
+        }
+        if let Some(v) = inner
+            .get("extra")
+            .and_then(|e| e.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            inner.insert(key.to_string(), Value::String(v.to_string()));
+        }
+    }
+
     // The AWS SDK requires a region for request signing even when talking to a
     // local endpoint (e.g. DynamoDB Local). Default it whenever the connection
     // has something to sign with — an endpoint (DynamoDB Local / custom
@@ -133,7 +161,8 @@ fn normalized_params(params: &Value) -> Value {
     // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) > plugin-level
     // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
     // Profile connections are exempt: they take their region from the AWS
-    // profile's own config.
+    // profile's own config (`extra["profile"]` included, which is why the
+    // promotion above runs first).
     let has_endpoint = has_non_blank(inner, "endpoint");
     let has_creds =
         has_non_blank(inner, "access_key_id") && has_non_blank(inner, "secret_access_key");
@@ -301,6 +330,161 @@ mod tests {
         let n = normalized_params(&params);
         assert_eq!(n["params"]["access_key_id"], "local");
         assert_eq!(n["params"]["secret_access_key"], "local");
+    }
+
+    // ── Opaque `extra` connection fields: profile / session token ──────
+    // (written by the plugin's `ui/` bundle through the host's
+    // `connection-modal.extra_fields` slot)
+
+    #[test]
+    fn extra_profile_is_promoted() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["profile"], "staging");
+    }
+
+    #[test]
+    fn extra_session_token_is_promoted() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"session_token": "FQoGZXIvYXdzEXAMPLE"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["session_token"], "FQoGZXIvYXdzEXAMPLE");
+    }
+
+    #[test]
+    fn extra_profile_and_session_token_together() {
+        let params = json!({"params": {
+            "username": "AKIA",
+            "password": "secret",
+            "extra": {"profile": "staging", "session_token": "tok"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["profile"], "staging");
+        assert_eq!(n["params"]["session_token"], "tok");
+        assert_eq!(n["params"]["access_key_id"], "AKIA");
+    }
+
+    #[test]
+    fn extra_values_are_trimmed() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "  staging  "},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["profile"], "staging");
+    }
+
+    #[test]
+    fn explicit_profile_wins_over_extra() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "profile": "default",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["profile"], "default");
+    }
+
+    #[test]
+    fn explicit_session_token_wins_over_extra() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "session_token": "explicit",
+            "extra": {"session_token": "from-ui"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["session_token"], "explicit");
+    }
+
+    #[test]
+    fn blank_explicit_profile_falls_back_to_extra() {
+        // A blank top-level value is "not supplied" — read_param drops it, so
+        // it must not mask the value the connection UI wrote.
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "profile": "   ",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["profile"], "staging");
+    }
+
+    #[test]
+    fn blank_extra_profile_is_ignored() {
+        // setExtraField(key, "") clears a field — it must not become a
+        // profile named "".
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "  ", "session_token": ""},
+        }});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("profile").is_none());
+        assert!(n["params"].get("session_token").is_none());
+    }
+
+    #[test]
+    fn non_string_extra_profile_ignored() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": 42},
+        }});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("profile").is_none());
+    }
+
+    #[test]
+    fn extra_profile_suppresses_region_default() {
+        // A profile connection takes its region from ~/.aws/config, so a
+        // profile chosen in the connection modal must keep the region
+        // fallbacks out of the way.
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
+    }
+
+    #[test]
+    fn extra_region_still_applies_when_profile_is_unset() {
+        // Regression guard for the promotion above: it must not disturb the
+        // existing `extra["region"]` handling.
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"region": "ap-southeast-2"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
+        assert!(n["params"].get("profile").is_none());
+    }
+
+    #[tokio::test]
+    async fn extra_profile_connection_is_accepted() {
+        // A profile picked in the connection modal, with nothing else filled
+        // in, is a complete connection as far as validation is concerned.
+        let params = json!({"params": {"extra": {"profile": "staging"}}});
+        match build_client(&params).await {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.message.contains("connection params required"),
+                "extra profile should satisfy validation, got: {}",
+                e.message
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_session_token_alone_is_not_a_connection() {
+        // A session token is only meaningful alongside credentials.
+        let params = json!({"params": {"extra": {"session_token": "tok"}}});
+        let err = build_client(&params).await.unwrap_err();
+        assert!(err.message.contains("connection params required"));
     }
 
     #[test]

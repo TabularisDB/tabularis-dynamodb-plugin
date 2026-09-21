@@ -1,0 +1,27 @@
+{
+  "name": "dynamodb-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UI extension bundle for the DynamoDB Tabularis plugin.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "test": "vite build && vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tabularis/plugin-api": "^0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.1.11"
+  }
+}
