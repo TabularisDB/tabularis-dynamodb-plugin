@@ -4,16 +4,17 @@ import json
 import subprocess
 import sys
 
-PLUGIN = "../target/release/dynamodb-plugin.exe"
-PARAMS = {
-    "params": {
-        "region": "us-east-1",
-        "access_key_id": "local",
-        "secret_access_key": "local",
-        "endpoint": "http://localhost:8000",
-    }
-}
-TABLE = "test_users"  # HASH id (S), RANGE created_at (S)
+import plugin_harness
+
+# Binary under test — `PLUGIN_BINARY` overrides the release build so a branch
+# or debug build can be exercised without overwriting `target/release` — plus
+# the composite-key fixture this suite needs, created and seeded here instead
+# of assumed from whatever the previous run left behind (#79).
+PLUGIN = plugin_harness.BINARY
+PARAMS = plugin_harness.params()
+TABLE = plugin_harness.TABLE  # HASH id (S), RANGE created_at (S)
+
+plugin_harness.ensure_test_users()
 
 passed = failed = 0
 

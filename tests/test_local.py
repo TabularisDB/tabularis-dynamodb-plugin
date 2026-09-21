@@ -10,14 +10,13 @@ import subprocess
 import sys
 import time
 
-BINARY = "../target/release/dynamodb-plugin.exe"
-CONN = {
-    "region": "us-east-1",
-    "access_key_id": "test",
-    "secret_access_key": "test",
-    "endpoint": "http://localhost:8000",
-}
-TABLE = "test_users"
+import plugin_harness
+
+# Binary under test — `PLUGIN_BINARY` overrides the release build so a branch or
+# debug build can be exercised without overwriting `target/release` (#79).
+BINARY = plugin_harness.BINARY
+CONN = plugin_harness.connection()
+TABLE = plugin_harness.TABLE
 
 passed = 0
 failed = 0
@@ -70,8 +69,11 @@ def check(name, resp, expect_error=False, expect_key=None):
 
 def main():
     print(f"🚀 Starting {BINARY}...")
+    # The suite owns the fixture it needs: create + seed `test_users` rather than
+    # assuming a previous run (or `just seed-dynamodb`) left it behind (#79).
+    plugin_harness.ensure_test_users()
     proc = subprocess.Popen(
-        [f"./{BINARY}"],
+        [BINARY],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

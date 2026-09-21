@@ -10,14 +10,12 @@ import sys
 import time
 import threading
 
-BINARY = "../target/release/dynamodb-plugin.exe"
-CONN = {
-    "region": "us-east-1",
-    "access_key_id": "test",
-    "secret_access_key": "test",
-    "endpoint": "http://localhost:8000",
-}
-TABLE = "test_users"
+import plugin_harness
+
+# Binary under test — `PLUGIN_BINARY` overrides the release build (#79).
+BINARY = plugin_harness.BINARY
+CONN = plugin_harness.connection()
+TABLE = plugin_harness.TABLE
 
 passed = []
 failed = []
@@ -99,9 +97,11 @@ def seed_edge_case_table():
 
 def main():
     seed_edge_case_table()
+    # The suite owns the fixture it needs: create + seed `test_users` (#79).
+    plugin_harness.ensure_test_users()
 
     proc = subprocess.Popen(
-        [f"./{BINARY}"],
+        [BINARY],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
     )
