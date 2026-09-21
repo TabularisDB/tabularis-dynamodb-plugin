@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.1.7] — 2026-09-21
+
+### Added
+
+- Plugin-owned connection fields, contributed through the host's
+  `connection-modal.extra_fields` slot (`tabularis#596`, requires Tabularis
+  ≥ 0.23.0): an **AWS region** select (the 34 regions from the plugin's region
+  setting, plus `Default (plugin setting)`), an optional **AWS profile**, and an
+  optional **Session token** for temporary (STS) credentials. Every value is
+  written to the connection's opaque `extra` map, which the host persists and
+  forwards untouched; the plugin promotes `extra["profile"]` and
+  `extra["session_token"]` onto the SDK parameters and consumes
+  `extra["region"]` in the region precedence chain described below. The `ui/`
+  bundle is built to `ui/dist/index.js` and ships inside each release archive.
+- The generic USERNAME/PASSWORD fields keep their labels — the manifest has no
+  per-field label override — so the slot carries an inline hint mapping them to
+  Access Key ID / Secret Access Key and noting both may be left empty when a
+  profile is used.
+
+### Fixed
+
+- Credentials-only connections no longer fail validation (#71). A connection
+  supplying an access-key/secret pair but no HOST/PORT was rejected with
+  `connection params required`, because the region fallback chain only ran when
+  an endpoint was present while `build_client` requires
+  `region + access_key_id + secret_access_key`. The chain now runs whenever the
+  connection has something to sign with — an endpoint **or** a complete
+  credential pair — so the request is signed with a resolved region and the AWS
+  SDK derives the endpoint, which is what makes the HOST field optional.
+- Blank (`""`) and `null` values for `endpoint`, `region` and `profile` are now
+  treated as "not supplied" instead of shadowing a fallback. A present-but-blank
+  key — which is what the GUI sends for untouched fields — previously suppressed
+  region defaulting entirely, and also made the plugin-level **Default AWS
+  region** setting a no-op for those connections.
+
+### Notes
+
+- Behaviour change: for a credentials-only connection with no region, the
+  documented chain decides the signing region (explicit `region` →
+  `extra["region"]` → endpoint hostname → plugin setting → `us-east-1`), and an
+  ambient `AWS_DEFAULT_REGION`/`AWS_REGION` no longer leaks in. Verified against
+  a SigV4 capture proxy: before this release such a connection signed
+  `eu-north-1` in an environment that set `AWS_DEFAULT_REGION=eu-north-1`, and
+  now signs `us-east-1`.
+- Connections that already supplied an endpoint behave identically; the #29
+  validation guard is unchanged (a connection with neither an endpoint nor
+  credentials is still rejected).
+
 ## [0.1.6] — 2026-08-24
 
 ### Fixed

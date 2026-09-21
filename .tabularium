@@ -1,6 +1,6 @@
 {
   "name": "dynamodb",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "kind": "driver",
   "icon": "https://raw.githubusercontent.com/TabularisDB/tabularis-dynamodb-plugin/main/dynamodb-icon.svg",
   "description": "Tabularis driver plugin for AWS DynamoDB. Connect with an AWS region + access key, a named profile, or DynamoDB Local.",
