@@ -26,6 +26,17 @@ seed-dynamodb:
 	aws dynamodb put-item --endpoint-url http://localhost:8000 --table-name users --item '{"id": {"S": "user2"}, "name": {"S": "Bob"}, "email": {"S": "bob@example.com"}, "age": {"N": "25"}}'
 	aws dynamodb put-item --endpoint-url http://localhost:8000 --table-name orders --item '{"id": {"S": "order1"}, "user_id": {"S": "user1"}, "total": {"N": "99.99"}, "status": {"S": "shipped"}}'
 
+# Create + seed the fixtures the Python suites assume: the composite-key
+# `test_users` table and `edge_cases`. Idempotent, so it is safe to re-run after
+# a suite has dropped or emptied a table (#79).
+[unix]
+seed-fixtures:
+	python3 tests/plugin_harness.py
+
+[windows]
+seed-fixtures:
+	python tests/plugin_harness.py
+
 # Build the plugin binary in debug mode (plus UI if present)
 build: build-ui
 	cargo build

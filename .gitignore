@@ -3,6 +3,10 @@ ui/dist
 target/
 debug/
 
+# Python bytecode from the tests/ suites
+__pycache__/
+*.pyc
+
 .idea/
 .vscode/
 .zed/

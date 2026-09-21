@@ -251,6 +251,7 @@ The `justfile` wraps the same commands CI runs on every PR (the `Test` job plus 
 |--------|--------------|
 | `just run-dynamodb` | Start DynamoDB Local in Docker |
 | `just seed-dynamodb` | Create and seed the `users` and `orders` tables |
+| `just seed-fixtures` | Create and seed the Python suites' fixtures (`test_users` with its composite key, plus `edge_cases`) |
 | `just build` | Debug build; builds the `ui/` bundle first when `ui/package.json` exists |
 | `just test` | `cargo test` |
 | `just test-integration` | Integration tests against DynamoDB Local (`DYNAMODB_ENDPOINT`, default `http://localhost:8000`) |
@@ -316,6 +317,27 @@ cargo test
 # Integration tests (requires DynamoDB Local)
 cargo test --test integration_test
 ```
+
+#### Python suites (`tests/*.py`)
+
+`tests/` also holds end-to-end suites that drive the built binary over JSON-RPC against DynamoDB Local. They cover RPC surface `cargo test` does not — the native `#!scan`/`#!query`/`#!get` modes, pagination, protocol abuse, the destructive-SQL guards.
+
+```bash
+# 1. DynamoDB Local, plus the fixtures the suites assume
+just run-dynamodb
+just seed-fixtures
+
+# 2. A build to drive, then run a suite from tests/
+cargo build --release
+cd tests && python test_local.py        # also test_deep.py, test_group_a.py, ...
+```
+
+| Env var | Default | What it does |
+|---|---|---|
+| `PLUGIN_BINARY` | `target/release/dynamodb-plugin(.exe)` | Binary under test. Point it at a branch or debug build to exercise it without overwriting `target/release` |
+| `DYNAMODB_ENDPOINT` | `http://localhost:8000` | Where DynamoDB Local listens |
+
+Each suite provisions what it needs through `tests/plugin_harness.py` before it runs — it creates and seeds the composite-key `test_users` table (and `edge_cases` where used) rather than expecting a previous run to have left it behind, and it restores `test_users` after its own destructive checks. `just seed-fixtures` runs the same helper on demand.
 
 ### Manual JSON-RPC test via shell
 
