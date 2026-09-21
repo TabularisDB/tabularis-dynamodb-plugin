@@ -543,7 +543,8 @@ mod tests {
 
     #[test]
     fn ini_has_section_matches_exact_names() {
-        let contents = "[default]\naws_access_key_id = x\n\n[profile staging]\nregion = us-east-1\n";
+        let contents =
+            "[default]\naws_access_key_id = x\n\n[profile staging]\nregion = us-east-1\n";
         assert!(ini_has_section(contents, &["default".to_string()]));
         assert!(ini_has_section(
             contents,
