@@ -160,17 +160,22 @@ fn normalized_params(params: &Value) -> Value {
     // > region parsed from an AWS endpoint hostname
     // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) > plugin-level
     // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
-    // Profile connections are exempt: they take their region from the AWS
-    // profile's own config (`extra["profile"]` included, which is why the
-    // promotion above runs first).
+    //
+    // Profile connections take their region from the AWS profile's own config
+    // (`extra["profile"]` included, which is why the promotion above runs
+    // first), so the plugin-setting and us-east-1 fallbacks stay out of the
+    // way — but connection-level choices (`extra["region"]` and the endpoint
+    // hostname) still apply, because the signing region must match the
+    // endpoint the request is sent to. A profile whose config disagrees with
+    // the endpoint region otherwise fails with
+    // `InvalidSignatureException: Credential should be scoped to a valid
+    // region`.
     let has_endpoint = has_non_blank(inner, "endpoint");
     let has_creds =
         has_non_blank(inner, "access_key_id") && has_non_blank(inner, "secret_access_key");
+    let has_profile = has_non_blank(inner, "profile");
 
-    if (has_endpoint || has_creds)
-        && !has_non_blank(inner, "region")
-        && !has_non_blank(inner, "profile")
-    {
+    if (has_endpoint || has_creds) && !has_non_blank(inner, "region") {
         let region = inner
             .get("extra")
             .and_then(|v| v.get("region"))
@@ -185,9 +190,23 @@ fn normalized_params(params: &Value) -> Value {
                     .and_then(region_from_endpoint)
                     .map(str::to_string)
             })
-            .or_else(crate::settings::default_region)
-            .unwrap_or_else(|| "us-east-1".to_string());
-        inner.insert("region".to_string(), Value::String(region));
+            .or_else(|| {
+                if has_profile {
+                    None
+                } else {
+                    crate::settings::default_region()
+                }
+            })
+            .or_else(|| {
+                if has_profile {
+                    None
+                } else {
+                    Some("us-east-1".to_string())
+                }
+            });
+        if let Some(region) = region {
+            inner.insert("region".to_string(), Value::String(region));
+        }
     }
 
     out
@@ -222,6 +241,42 @@ fn region_from_endpoint(endpoint: &str) -> Option<&str> {
 /// must be present. Otherwise we reject the request rather than silently
 /// resolving credentials from the ambient environment, which would make the
 /// connection "test" meaningless.
+/// True when `name` exists as a section in the AWS shared credentials file
+/// (`[name]`) or the AWS config file (`[profile name]`, or plain `[name]`
+/// for `default`). Honours `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
+fn profile_exists(name: &str) -> bool {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let creds_path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".aws/credentials")));
+    let config_path = std::env::var_os("AWS_CONFIG_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".aws/config")));
+
+    if let Some(contents) = creds_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        if ini_has_section(&contents, &[name.to_string()]) {
+            return true;
+        }
+    }
+    if let Some(contents) = config_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        if ini_has_section(&contents, &[format!("profile {name}"), name.to_string()]) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when any of `names` appears as an INI section header.
+fn ini_has_section(contents: &str, names: &[String]) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line.starts_with('[')
+            && line.ends_with(']')
+            && names
+                .iter()
+                .any(|n| line[1..line.len() - 1].trim() == n.trim())
+    })
+}
+
 pub async fn build_client(params: &Value) -> Result<Client, PluginError> {
     // Map generic GUI fields (host/port/username/password) onto AWS-shaped
     // keys before reading, so TabularisDB's default connection form works.
@@ -244,6 +299,18 @@ pub async fn build_client(params: &Value) -> Result<Client, PluginError> {
             "connection params required: provide at least an endpoint, or \
              region + access_key_id + secret_access_key, or a profile",
         ));
+    }
+
+    // Fail fast with an actionable message when the named profile does not
+    // exist; the SDK otherwise surfaces a generic credential/dispatch error
+    // that gives no hint the profile name itself is wrong.
+    if let Some(profile_name) = profile {
+        if !profile_exists(profile_name) {
+            return Err(PluginError::invalid_params(format!(
+                "AWS profile '{profile_name}' not found in ~/.aws/credentials or \
+                 ~/.aws/config"
+            )));
+        }
     }
 
     Client::new(
@@ -440,14 +507,84 @@ mod tests {
     #[test]
     fn extra_profile_suppresses_region_default() {
         // A profile connection takes its region from ~/.aws/config, so a
-        // profile chosen in the connection modal must keep the region
-        // fallbacks out of the way.
+        // profile chosen in the connection modal must keep the plugin-setting
+        // and us-east-1 fallbacks out of the way.
         let params = json!({"params": {
             "endpoint": "http://localhost:8000",
             "extra": {"profile": "staging"},
         }});
         let n = normalized_params(&params);
         assert!(n["params"].get("region").is_none());
+    }
+
+    #[test]
+    fn profile_with_aws_endpoint_still_gets_endpoint_region() {
+        // The signing region must match the endpoint the request is sent to.
+        // A profile only suppresses the *fallback* chain; a region parsed
+        // from an AWS endpoint hostname still applies, otherwise the request
+        // fails with "Credential should be scoped to a valid region".
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com:443",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn profile_with_extra_region_keeps_explicit_region() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "staging", "region": "eu-central-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-central-1");
+    }
+
+    #[test]
+    fn ini_has_section_matches_exact_names() {
+        let contents = "[default]\naws_access_key_id = x\n\n[profile staging]\nregion = us-east-1\n";
+        assert!(ini_has_section(contents, &["default".to_string()]));
+        assert!(ini_has_section(
+            contents,
+            &["profile staging".to_string(), "staging".to_string()]
+        ));
+        assert!(!ini_has_section(contents, &["prod".to_string()]));
+        // Substring of an existing section must not match.
+        assert!(!ini_has_section(contents, &["stagin".to_string()]));
+    }
+
+    #[test]
+    fn profile_exists_reads_credentials_and_config() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("ddb-prof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds = dir.join("credentials");
+        let config = dir.join("config");
+        std::fs::write(&creds, "[default]\naws_access_key_id = x\n").unwrap();
+        std::fs::write(&config, "[profile staging]\nregion = us-east-1\n").unwrap();
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds);
+        std::env::set_var("AWS_CONFIG_FILE", &config);
+
+        assert!(profile_exists("default"));
+        assert!(profile_exists("staging"));
+        assert!(!profile_exists("nonexistent-profile"));
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        std::env::remove_var("AWS_CONFIG_FILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn unknown_profile_rejected_with_clear_message() {
+        let params = json!({"params": {"extra": {"profile": "definitely-not-a-real-profile-xyz"}}});
+        let err = build_client(&params).await.unwrap_err();
+        assert!(
+            err.message.contains("not found in ~/.aws/credentials"),
+            "expected profile-not-found error, got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -642,15 +779,17 @@ mod tests {
     }
 
     #[test]
-    fn extra_region_ignored_for_profile_connections() {
-        // Profile connections inherit their region from ~/.aws/config.
+    fn extra_region_applies_for_profile_connections() {
+        // An explicit region picked in the connection modal is a
+        // connection-level choice and wins over the profile's own config;
+        // only the plugin-setting / us-east-1 fallbacks stay suppressed.
         let params = json!({"params": {
             "endpoint": "http://localhost:8000",
             "profile": "default",
             "extra": {"region": "ap-southeast-2"},
         }});
         let n = normalized_params(&params);
-        assert!(n["params"].get("region").is_none());
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
     }
 
     #[tokio::test]
