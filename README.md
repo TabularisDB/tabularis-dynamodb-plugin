@@ -32,6 +32,7 @@ This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local inst
 - [Supported Operations](#supported-operations)
 - [Building from Source](#building-from-source)
 - [Development](#development)
+- [Releasing](#releasing)
 - [Changelog](#changelog)
 - [License](#license)
 
@@ -128,10 +129,12 @@ If your version of Tabularis supports plugin management, the DynamoDB plugin can
 | OS | Plugins Directory |
 |---|---|
 | **Linux** | `~/.local/share/tabularis/plugins/dynamodb/` |
-| **macOS** | `~/Library/Application Support/com.debba.tabularis/plugins/dynamodb/` |
-| **Windows** | `%APPDATA%\debba\tabularis\data\plugins\dynamodb\` |
+| **macOS** | `~/Library/Application Support/tabularis/plugins/dynamodb/` |
+| **Windows** | `%APPDATA%\tabularis\plugins\dynamodb\` |
 
 4. Restart Tabularis.
+
+Since core PR [#258](https://github.com/TabularisDB/tabularis/pull/258) the plugin folder lives under the unified `tabularis` directory on Windows and macOS; older builds read it from the legacy `com.debba.tabularis` location (on Windows `%APPDATA%\debba\tabularis\data\plugins\dynamodb\`), and the app moves plugins out of there into the new folder on first startup.
 
 ## How It Works
 
@@ -238,6 +241,39 @@ cp .tabularium ~/.local/share/tabularis/plugins/dynamodb/
 
 ## Development
 
+Working on the plugin needs Rust (edition 2021, toolchain pinned by `rust-toolchain.toml`), Docker for DynamoDB Local, and Node.js only if you touch `ui/`.
+
+### Common just recipes
+
+The `justfile` wraps the same commands CI runs on every PR (the `Test` job plus the `UI extension` job), so a local green run is the same check CI performs:
+
+| Recipe | What it does |
+|--------|--------------|
+| `just run-dynamodb` | Start DynamoDB Local in Docker |
+| `just seed-dynamodb` | Create and seed the `users` and `orders` tables |
+| `just build` | Debug build; builds the `ui/` bundle first when `ui/package.json` exists |
+| `just test` | `cargo test` |
+| `just test-integration` | Integration tests against DynamoDB Local (`DYNAMODB_ENDPOINT`, default `http://localhost:8000`) |
+| `just test-ui` | `npm run typecheck` plus the UI bundle tests |
+| `just lint` | `cargo clippy --all-targets -- -D warnings` |
+| `just fmt` | `cargo fmt --all` |
+| `just repl` | Launch the RPC REPL (`cargo run --bin test_plugin`) |
+| `just dev-install` | Build, then copy the binary, `.tabularium` and the UI bundle into the plugin folder |
+
+The integration suite is gated on `DYNAMODB_ENDPOINT`: `just test-integration` defaults it to `http://localhost:8000`, so start and seed DynamoDB Local first (`just run-dynamodb`, `just seed-dynamodb`). With the variable unset the whole suite skips — which is how CI stays green without Docker.
+
+**Installing a local build:** `just dev-install` still writes to the pre-#258 folders (`%APPDATA%\debba\tabularis\data\plugins\dynamodb` on Windows, `~/Library/Application Support/com.debba.tabularis/plugins/dynamodb` on macOS). Current Tabularis reads the folder from [Manual Installation](#manual-installation) instead, so copy the build there if the app doesn't pick it up — and close Tabularis first, it locks the running binary.
+
+### Project layout
+
+- `src/main.rs` — stdio transport and worker pool
+- `src/rpc.rs` — JSON-RPC method dispatch
+- `src/handlers/` — `connection`, `query`, `metadata`, `crud` and `ddl` handlers
+- `src/dynamodb/` — AWS SDK client wrapper and the 30-minute config pool
+- `src/utils/extractor.rs` — parameter extraction helpers
+- `src/bin/test_plugin.rs` — the RPC REPL
+- `ui/` — UI extension bundle contributing the connection-modal fields
+
 ### Testing the Plugin
 
 **Simulated Tabularis integration test** (interactive REPL for testing RPC handlers):
@@ -295,6 +331,32 @@ echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"
 - **Serialization:** serde + serde_json
 - **Async runtime:** tokio
 - **Protocol:** JSON-RPC 2.0 over stdio
+
+## Releasing
+
+Releases are cut from a version tag: CI builds the archives, and the hosted registry ingests the result on its own. Nothing else needs to be updated.
+
+1. Bump `version` in **both** `Cargo.toml` and `.tabularium` to the same value — the tag and the manifest `version` must agree, and the registry rejects an ingest whose tag (minus the `v`) disagrees with the manifest.
+2. Move the unreleased entries in `CHANGELOG.md` into a new `## [X.Y.Z] — YYYY-MM-DD` section at the top.
+3. Commit (`chore(release): bump version to vX.Y.Z`) and push to `main`.
+4. Tag that commit and push the tag: `git tag vX.Y.Z && git push origin main --tags`.
+5. `.github/workflows/release.yml` runs on the tag. It builds five targets — `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win-x64` — stages each binary with `.tabularium` (plus `ui/dist/index.js` when the UI extension is present), publishes a GitHub Release with the five `dynamodb-plugin-<platform>.zip` archives, and attaches `.tabularium` as a standalone asset under the name `default.tabularium`. That standalone copy is the manifest the registry reads.
+
+Practically, the `.tabularium` version bump is what marks a release — the tag only triggers the build.
+
+### Distribution: the hosted registry
+
+The plugin is published through [registry.tabularis.dev/plugins/dynamodb](https://registry.tabularis.dev/plugins/dynamodb), which reads the manifest from the release assets and refreshes its version table automatically when a new tag is published. The plugin is already submitted and approved there, so a release needs **no** manual re-submission — v0.1.6 and v0.1.7 both appeared on that page without one.
+
+Bumping the plugin's entry in the core repo's `plugins/registry.json` is the legacy path, kept only for plugins that were never added to the hosted registry — see the maintainer's note on [tabularis#796](https://github.com/TabularisDB/tabularis/pull/796#issuecomment-5756546338). For this plugin that PR is unnecessary.
+
+The registry renders this README on the plugin page, so README edits reach users with the next release.
+
+### Post-release checks
+
+- The GitHub Release lists all five zips plus `default.tabularium`.
+- `curl -s https://registry.tabularis.dev/api/plugins/dynamodb | jq '.latestVersion'` reports the new version, with the release and its per-platform assets under `releases`.
+- Installing or updating the plugin from inside Tabularis pulls the new build.
 
 ## [Changelog](./CHANGELOG.md)
 
