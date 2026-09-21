@@ -230,22 +230,68 @@ fn region_from_endpoint(endpoint: &str) -> Option<&str> {
     }
 }
 
-/// Build a DynamoDB client from a JSON-RPC params object, validating the
-/// connection configuration first.
+/// Operating system whose home-directory conventions apply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HomeOs {
+    Windows,
+    Unix,
+}
+
+impl HomeOs {
+    fn real() -> Self {
+        if std::env::consts::OS == "windows" {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+/// Resolve the home directory the AWS SDK itself would use, mirroring
+/// `aws_runtime::fs_util::home_dir`: `HOME` first on every platform, then the
+/// Windows variables (`USERPROFILE`, then `HOMEDRIVE` + `HOMEPATH`).
 ///
-/// Validation rule (#29): at least one of
-///   - an explicit `endpoint` (e.g. DynamoDB Local), or
-///   - a `region` together with credentials (`access_key_id` +
-///     `secret_access_key`) or a `profile`
-///
-/// must be present. Otherwise we reject the request rather than silently
-/// resolving credentials from the ambient environment, which would make the
-/// connection "test" meaningless.
+/// A GUI-launched plugin on Windows has no `HOME` — it is not a Windows
+/// variable, only shells like git-bash set it — so resolving the profile files
+/// from `HOME` alone rejects profiles the SDK resolves without complaint.
+fn home_dir_from(
+    os: HomeOs,
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    homedrive: Option<std::ffi::OsString>,
+    homepath: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    if let Some(home) = home {
+        return Some(std::path::PathBuf::from(home));
+    }
+    if os == HomeOs::Windows {
+        if let Some(userprofile) = userprofile {
+            return Some(std::path::PathBuf::from(userprofile));
+        }
+        if let (Some(mut drive), Some(path)) = (homedrive, homepath) {
+            drive.push(path);
+            return Some(std::path::PathBuf::from(drive));
+        }
+    }
+    None
+}
+
+/// [`home_dir_from`] fed from this process's environment.
+fn aws_home_dir() -> Option<std::path::PathBuf> {
+    home_dir_from(
+        HomeOs::real(),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOMEDRIVE"),
+        std::env::var_os("HOMEPATH"),
+    )
+}
+
 /// True when `name` exists as a section in the AWS shared credentials file
 /// (`[name]`) or the AWS config file (`[profile name]`, or plain `[name]`
 /// for `default`). Honours `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
 fn profile_exists(name: &str) -> bool {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = aws_home_dir();
     let creds_path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
         .map(std::path::PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".aws/credentials")));
@@ -277,6 +323,17 @@ fn ini_has_section(contents: &str, names: &[String]) -> bool {
     })
 }
 
+/// Build a DynamoDB client from a JSON-RPC params object, validating the
+/// connection configuration first.
+///
+/// Validation rule (#29): at least one of
+///   - an explicit `endpoint` (e.g. DynamoDB Local), or
+///   - a `region` together with credentials (`access_key_id` +
+///     `secret_access_key`) or a `profile`
+///
+/// must be present. Otherwise we reject the request rather than silently
+/// resolving credentials from the ambient environment, which would make the
+/// connection "test" meaningless.
 pub async fn build_client(params: &Value) -> Result<Client, PluginError> {
     // Map generic GUI fields (host/port/username/password) onto AWS-shaped
     // keys before reading, so TabularisDB's default connection form works.
@@ -553,6 +610,51 @@ mod tests {
         assert!(!ini_has_section(contents, &["prod".to_string()]));
         // Substring of an existing section must not match.
         assert!(!ini_has_section(contents, &["stagin".to_string()]));
+    }
+
+    #[test]
+    fn home_dir_matches_the_sdk_resolution() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        // HOME wins on every platform, even when the Windows variables are
+        // set too (they are only consulted when HOME is absent).
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Windows,
+                os("/home/x"),
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            Some(std::path::PathBuf::from("/home/x"))
+        );
+        // Windows without HOME: USERPROFILE, which is what a GUI-launched
+        // plugin process actually has.
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Windows,
+                None,
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            Some(std::path::PathBuf::from("C:\\Users\\x"))
+        );
+        // Windows without HOME or USERPROFILE: HOMEDRIVE + HOMEPATH.
+        assert_eq!(
+            home_dir_from(HomeOs::Windows, None, None, os("C:"), os("\\Users\\x")),
+            Some(std::path::PathBuf::from("C:\\Users\\x"))
+        );
+        // Unix never consults the Windows variables.
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Unix,
+                None,
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            None
+        );
     }
 
     #[test]
