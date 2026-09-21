@@ -2,6 +2,7 @@
 """Live JSON-RPC test for #8: ConsumedCapacity reporting + destructive guard."""
 import json
 import subprocess
+import time
 
 import plugin_harness
 
@@ -41,6 +42,23 @@ def check(name, cond, detail=""):
     else:
         failed += 1
         print(f"  FAIL  {name}  {detail}")
+
+
+def table_names():
+    resp = rpc("get_tables", PARAMS)
+    result = resp.get("result")
+    return [t.get("name") for t in result] if isinstance(result, list) else []
+
+
+def wait_for_table(name, present, timeout=15.0):
+    """DynamoDB Local's table state is eventually consistent - poll instead of
+    assuming a create/drop has already landed."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (name in table_names()) is present:
+            return True
+        time.sleep(0.5)
+    return False
 
 
 # Ensure a row exists to read.
@@ -84,21 +102,24 @@ check("scan Limit:1 returns exactly 1 row", len(res.get("rows", [])) == 1, f"got
 check("scan Limit:1 signals has_more/pagination", res.get("has_more") is True or res.get("pagination") is not None,
       f"has_more={res.get('has_more')} pagination={res.get('pagination')}")
 
-print("== #8: destructive guard ==")
-# DROP TABLE must be blocked without confirmation.
-r_drop = rpc("execute_query", {**PARAMS, "query": f'DROP TABLE "{TABLE}"'})
-warn = r_drop.get("result", {}).get("warning")
-check("DROP TABLE blocked with warning", warn is not None and "confirm" in warn.lower(),
-      f"got: {json.dumps(r_drop)[:200]}")
-# Verify table still exists (guard actually prevented execution).
-r_tbls = rpc("get_tables", PARAMS)
-names = [t.get("name") for t in r_tbls.get("result", [])] if isinstance(r_tbls.get("result"), list) else []
-check("table survived blocked DROP", TABLE in names, f"tables={names}")
+print("== #8: destructive SQL ==")
+# DROP TABLE is deliberately not guarded any more (the GUI confirms it itself),
+# so the drop executes and reports what it did. Run that check against its own
+# table so it cannot take the shared fixture down with it (#79/#80).
+DROP_TABLE = "issue8_drop_target"
+plugin_harness.ensure_table(DROP_TABLE, (("id", "HASH"),))
+check("destructive target table exists", wait_for_table(DROP_TABLE, True),
+      f"tables={table_names()}")
 
-# `DROP TABLE` is not guarded any more (the GUI confirms it itself), so if the
-# drop above went through, the shared fixture is gone. Put it back before the
-# rest of the batch runs (#79).
-plugin_harness.ensure_test_users()
+r_drop = rpc("execute_query", {**PARAMS, "query": f'DROP TABLE "{DROP_TABLE}"'})
+drop_warning = (r_drop.get("result") or {}).get("warning") or ""
+check("DROP TABLE executes and reports the drop",
+      "result" in r_drop and "dropped" in drop_warning.lower(),
+      f"got: {json.dumps(r_drop)[:200]}")
+check("dropped table is gone", wait_for_table(DROP_TABLE, False),
+      f"tables={table_names()}")
+check("shared test_users fixture untouched by the destructive check",
+      TABLE in table_names(), f"tables={table_names()}")
 
 # WHERE-less DELETE must be blocked.
 r_del = rpc("execute_query", {**PARAMS, "query": f'DELETE FROM "{TABLE}"'})

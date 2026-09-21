@@ -61,6 +61,19 @@ def check(name, resp, expect_ok=True, expect_error_contains=None):
         print(f"  ❌ {name}: expected error but got success")
 
 
+def check_rows(name, resp, minimum=0, exact=None):
+    """`check()` only reads success/error; the native query modes must also come
+    back with the expected number of rows."""
+    rows = resp.get("result", {}).get("rows", []) if "result" in resp else []
+    if "result" in resp and len(rows) >= minimum and (exact is None or len(rows) == exact):
+        passed.append((name, resp["result"]))
+        print(f"  ✅ {name} ({len(rows)} row(s))")
+    else:
+        detail = resp.get("error") or f"{len(rows)} row(s)"
+        failed.append((name, detail))
+        print(f"  ❌ {name}: {detail}")
+
+
 def note_bug(name, detail):
     bugs.append((name, detail))
     print(f"  🐛 BUG: {name}")
@@ -257,39 +270,36 @@ def main():
     }, req_id=20)
     check("#!partiql prefix query", r)
 
-    # 2b. #!scan prefix (should work as passthrough PartiQL)
+    # 2b. #!scan prefix - native Scan API, body is a YAML mapping
+    r = send(proc, "execute_query", {
+        "params": CONN,
+        "query": f"#!scan\nTableName: {TABLE}\nLimit: 5",
+    }, req_id=21)
+    check_rows("#!scan prefix query", r, minimum=1)
+
+    # 2c. #!query prefix - native Query API, needs the partition key
+    r = send(proc, "execute_query", {
+        "params": CONN,
+        "query": f"#!query\nTableName: {TABLE}\nPartitionKey: id\nPartitionValue: usr-001",
+    }, req_id=22)
+    check_rows("#!query prefix query", r, exact=1)
+
+    # 2d. #!get prefix - native GetItem, needs the full primary key
+    r = send(proc, "execute_query", {
+        "params": CONN,
+        "query": f"#!get\nTableName: {TABLE}\nKey:\n  id: usr-001\n  created_at: 2026-01-01T00:00:00Z",
+    }, req_id=23)
+    check_rows("#!get prefix query", r, exact=1)
+
+    # 2e. A body that is not a YAML mapping is rejected with a clear message: the
+    #     native modes read a mapping (TableName/Limit/PartitionKey/Key/...), so
+    #     handing them a PartiQL statement is a user error, not a passthrough.
     r = send(proc, "execute_query", {
         "params": CONN,
         "query": f"#!scan\nSELECT name FROM {TABLE} WHERE id = 'usr-001'",
-    }, req_id=21)
-    check("#!scan prefix query", r)
-
-    # 2c. #!query prefix
-    r = send(proc, "execute_query", {
-        "params": CONN,
-        "query": f"#!query\nSELECT name FROM {TABLE} WHERE id = 'usr-001'",
-    }, req_id=22)
-    check("#!query prefix query", r)
-
-    # 2d. #!get prefix
-    r = send(proc, "execute_query", {
-        "params": CONN,
-        "query": f"#!get\nSELECT name FROM {TABLE} WHERE id = 'usr-001'",
-    }, req_id=23)
-    check("#!get prefix query", r)
-
-    # 2e. #!scan with YAML-like body (NOT valid PartiQL — should fail gracefully)
-    r = send(proc, "execute_query", {
-        "params": CONN,
-        "query": f"#!scan\ntable: {TABLE}\nlimit: 5\nfilter: active = true",
     }, req_id=24)
-    # This SHOULD fail because the body isn't valid PartiQL
-    if "error" in r:
-        passed.append(("#!scan YAML body fails gracefully", r["error"]))
-        print(f"  ✅ #!scan YAML body fails gracefully: {r['error'].get('message', '')[:60]}")
-        note_bug("#!scan mode not implemented", "YAML-like scan/query/get bodies are passed through as PartiQL and fail. The QueryMode::Scan/Query/Get arms just call execute_statement() with the raw body — no YAML parsing or SDK Scan/Query/GetItem calls.")
-    else:
-        note_bug("#!scan YAML body unexpected success", f"Got result: {str(r.get('result', ''))[:100]}")
+    check("#!scan rejects a non-mapping body", r, expect_ok=False,
+          expect_error_contains="YAML mapping")
 
     print()
     print("=" * 70)
