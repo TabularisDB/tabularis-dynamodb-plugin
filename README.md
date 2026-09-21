@@ -262,7 +262,7 @@ The `justfile` wraps the same commands CI runs on every PR (the `Test` job plus 
 
 The integration suite is gated on `DYNAMODB_ENDPOINT`: `just test-integration` defaults it to `http://localhost:8000`, so start and seed DynamoDB Local first (`just run-dynamodb`, `just seed-dynamodb`). With the variable unset the whole suite skips — which is how CI stays green without Docker.
 
-**Installing a local build:** `just dev-install` still writes to the pre-#258 folders (`%APPDATA%\debba\tabularis\data\plugins\dynamodb` on Windows, `~/Library/Application Support/com.debba.tabularis/plugins/dynamodb` on macOS). Current Tabularis reads the folder from [Manual Installation](#manual-installation) instead, so copy the build there if the app doesn't pick it up — and close Tabularis first, it locks the running binary.
+**Installing a local build:** `just dev-install` writes into the plugin folder from [Manual Installation](#manual-installation) — the unified `tabularis` directory on Windows and macOS. On a machine where only the pre-#258 tree exists it installs there instead, so an older Tabularis that has not migrated yet still picks the build up. Close Tabularis first: it locks the running binary.
 
 ### Project layout
 
