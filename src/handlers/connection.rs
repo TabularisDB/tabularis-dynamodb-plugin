@@ -148,11 +148,9 @@ fn normalized_params(params: &Value) -> Value {
     }
 
     // The AWS SDK requires a region for request signing even when talking to a
-    // local endpoint (e.g. DynamoDB Local). Default it whenever the connection
-    // has something to sign with — an endpoint (DynamoDB Local / custom
-    // endpoint) or an explicit access-key/secret pair — since the generic GUI
-    // form has no region field and a keys-only connection has no endpoint to
-    // parse a region out of (#71).
+    // local endpoint (e.g. DynamoDB Local), since the generic GUI form has no
+    // region field and a keys-only connection has no endpoint to parse a region
+    // out of (#71).
     //
     // Precedence: explicit top-level `region` > opaque `extra["region"]`
     // (connection-level extra fields, persisted and forwarded by the host
@@ -161,22 +159,22 @@ fn normalized_params(params: &Value) -> Value {
     // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) > plugin-level
     // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
     //
-    // Profile connections take their region from the AWS profile's own config
-    // (`extra["profile"]` included, which is why the promotion above runs
-    // first), so the plugin-setting and us-east-1 fallbacks stay out of the
-    // way — but connection-level choices (`extra["region"]` and the endpoint
-    // hostname) still apply, because the signing region must match the
-    // endpoint the request is sent to. A profile whose config disagrees with
-    // the endpoint region otherwise fails with
+    // The first two are connection-level choices, so they apply to every
+    // connection that says nothing itself, profile or not — the signing region
+    // must match the endpoint the request is sent to, and a profile whose
+    // config disagrees with it otherwise fails with
     // `InvalidSignatureException: Credential should be scoped to a valid
-    // region`.
+    // region`. Profile connections take their region from the AWS profile's own
+    // config (`extra["profile"]` included, which is why the promotion above
+    // runs first), so the plugin-setting and us-east-1 fallbacks stay out of
+    // their way.
     let has_endpoint = has_non_blank(inner, "endpoint");
     let has_creds =
         has_non_blank(inner, "access_key_id") && has_non_blank(inner, "secret_access_key");
     let has_profile = has_non_blank(inner, "profile");
 
-    if (has_endpoint || has_creds) && !has_non_blank(inner, "region") {
-        let region = inner
+    if !has_non_blank(inner, "region") {
+        let connection_region = inner
             .get("extra")
             .and_then(|v| v.get("region"))
             .and_then(|v| v.as_str())
@@ -189,22 +187,19 @@ fn normalized_params(params: &Value) -> Value {
                     .and_then(|v| v.as_str())
                     .and_then(region_from_endpoint)
                     .map(str::to_string)
-            })
-            .or_else(|| {
-                if has_profile {
-                    None
-                } else {
-                    crate::settings::default_region()
-                }
-            })
-            .or_else(|| {
-                if has_profile {
-                    None
-                } else {
-                    Some("us-east-1".to_string())
-                }
             });
-        if let Some(region) = region {
+
+        // Fallback only, and only where the connection has something to sign
+        // with: a profile resolves its own region, and a connection with
+        // neither an endpoint nor explicit keys is rejected by `build_client`
+        // regardless of the region.
+        let fallback = if has_profile || !(has_endpoint || has_creds) {
+            None
+        } else {
+            crate::settings::default_region().or_else(|| Some("us-east-1".to_string()))
+        };
+
+        if let Some(region) = connection_region.or(fallback) {
             inner.insert("region".to_string(), Value::String(region));
         }
     }
@@ -596,6 +591,27 @@ mod tests {
         }});
         let n = normalized_params(&params);
         assert_eq!(n["params"]["region"], "eu-central-1");
+    }
+
+    #[test]
+    fn profile_only_connection_keeps_connection_level_region() {
+        // The region selector is a connection-level choice, so an explicit
+        // `extra["region"]` must not be dropped just because the profile (and
+        // not an endpoint or a key pair) is what the connection signs with.
+        let params = json!({"params": {
+            "extra": {"profile": "staging", "region": "eu-west-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn profile_only_connection_leaves_region_to_the_profile() {
+        // Nothing connection-level said a region, so the profile's own config
+        // decides — including when there is no endpoint to parse one from.
+        let params = json!({"params": {"extra": {"profile": "staging"}}});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
     }
 
     #[test]
