@@ -71,21 +71,22 @@ pub async fn get_config(
 
     let sdk_config = config_builder.load().await;
 
-    // Build DynamoDB-specific config
-    let mut dynamo_config_builder = Config::builder();
-    dynamo_config_builder = dynamo_config_builder.region(
+    // Build the DynamoDB service config FROM the SDK config rather than from a
+    // bare builder, so everything `aws_config::defaults().load()` resolved is
+    // carried into the service config: the endpoint URL from `AWS_ENDPOINT_URL`
+    // / `AWS_ENDPOINT_URL_DYNAMODB`, the retry policy, the timeouts, the HTTP
+    // client and the identity cache. A bare builder dropped all of it, which is
+    // why a connection with no HOST/PORT could never be aimed at DynamoDB Local
+    // — the endpoint env var was resolved and then thrown away (#77).
+    let mut dynamo_config_builder = aws_sdk_dynamodb::config::Builder::from(&sdk_config).region(
         sdk_config
             .region()
             .cloned()
             .unwrap_or_else(|| aws_config::Region::new("us-east-1")),
     );
 
-    // Copy credentials provider from SDK config
-    if let Some(creds_provider) = sdk_config.credentials_provider() {
-        dynamo_config_builder = dynamo_config_builder.credentials_provider(creds_provider.clone());
-    }
-
-    // If an endpoint override is provided (for DynamoDB Local), use it
+    // An explicit endpoint param wins over the environment (applied last), so a
+    // connection that fills HOST/PORT still targets exactly that endpoint.
     if let Some(endpoint_str) = endpoint {
         dynamo_config_builder = dynamo_config_builder.endpoint_url(endpoint_str);
     }
