@@ -73,7 +73,19 @@ The signing region is resolved in this order (first match wins):
 | 4 | plugin default region | **Settings → Plugins → DynamoDB → Default AWS region** |
 | 5 | fallback | `us-east-1` |
 
-SigV4 signing requires a region and AWS rejects a request whose signing region does not match the endpoint's region (`InvalidSignatureException`), so let the region be derived from the hostname, or set it explicitly. Profile-based connections are exempt: they take their region from `~/.aws/config`.
+SigV4 signing requires a region and AWS rejects a request whose signing region does not match the endpoint's region (`InvalidSignatureException`), so let the region be derived from the hostname, or set it explicitly.
+
+Those five steps are the *whole* chain for a connection the plugin signs itself — one that fills HOST/PORT, or supplies an access key and secret. **An ambient `AWS_REGION` / `AWS_DEFAULT_REGION` does not participate.** Measured with a SigV4 capture proxy on a keys-only connection, in an environment that set `AWS_REGION=eu-north-1`:
+
+| Setting on the connection | Signed region |
+|---|---|
+| nothing (no region, no plugin default) | `us-east-1` — the documented fallback, not `eu-north-1` |
+| plugin default region `ap-southeast-2` | `ap-southeast-2` |
+| explicit `region: eu-west-1` | `eu-west-1` |
+
+So the region comes from the connection or from **Settings → Plugins → DynamoDB**, never from the environment. If a connection signs the wrong region, check those two, not the shell it was started from.
+
+**Profile connections are the exception, and they do inherit it.** The chain above is skipped for them: the plugin hands the profile to the AWS SDK, whose own resolution decides — `AWS_REGION` / `AWS_DEFAULT_REGION` from the plugin's environment first, then `region` in the profile's `~/.aws/config`, then instance/container metadata. That puts the environment *ahead* of the profile's own region, as it is for the AWS CLI: a profile with `region = ca-central-1` signed `eu-north-1` in an environment that set `AWS_REGION=eu-north-1`.
 
 ### Authentication methods
 
@@ -82,7 +94,7 @@ Credentials are resolved in the following order:
 1. **Explicit credentials** — the Access Key ID / Secret Access Key entered in USERNAME / PASSWORD (mapped to `access_key_id` / `secret_access_key`).
 2. **Session token** — `session_token` for temporary credentials (e.g. from AWS STS).
 3. **AWS profile** — `profile`, pointing at a named profile in `~/.aws/credentials`.
-4. **Environment variables** — the plugin reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` from the environment.
+4. **Environment variables** — the plugin reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from the environment. `AWS_REGION` / `AWS_DEFAULT_REGION` are **not** part of the region chain: they only reach connections whose region the plugin leaves to the SDK, i.e. profile connections (see [Region resolution](#region-resolution)).
 5. **IMDS** — automatically uses EC2 instance metadata or ECS task roles when running on AWS infrastructure.
 
 For DynamoDB Local, point HOST/PORT at it (`localhost` / `8000`) and give USERNAME/PASSWORD any non-empty value — the plugin passes the endpoint through as-is instead of signing against real AWS:

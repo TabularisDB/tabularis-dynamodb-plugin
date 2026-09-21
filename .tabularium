@@ -17,7 +17,7 @@
       "label": "Default AWS region",
       "type": "select",
       "default": "",
-      "description": "Signing region used when a connection does not specify one and the endpoint is not a standard AWS hostname (which encodes its region). Leave blank to fall back to us-east-1.",
+      "description": "Signing region used when a connection does not specify one and the endpoint is not a standard AWS hostname (which encodes its region). Applies to connections that sign with an endpoint or an explicit access key; profile connections take their region from the environment and the profile config instead. Leave blank to fall back to us-east-1.",
       "required": false,
       "options": [
         "",
