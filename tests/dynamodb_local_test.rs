@@ -119,6 +119,53 @@ async fn get_tables_lists_seeded_tables() {
     );
 }
 
+/// #77: the endpoint the AWS SDK resolves from `AWS_ENDPOINT_URL` must reach the
+/// DynamoDB service config, so a connection with no explicit `endpoint` param
+/// (HOST/PORT empty, as the GUI sends for a credentials-only connection) can
+/// still be aimed at DynamoDB Local. Before the fix the endpoint was resolved by
+/// `aws_config` and then dropped by a bare service builder, so the request went
+/// to real AWS instead.
+///
+/// `AWS_ENDPOINT_URL` is process-global: this uses its own credential pair so it
+/// can't collide with the config-pool cache, restores the variable afterwards,
+/// and expects the file to run with `--test-threads=1` (what `just
+/// test-integration` does).
+#[tokio::test]
+async fn aws_endpoint_url_env_reaches_the_service_config() {
+    let Some(ep) = endpoint() else { return };
+    let previous = std::env::var("AWS_ENDPOINT_URL").ok();
+    std::env::set_var("AWS_ENDPOINT_URL", &ep);
+
+    let params = json!({
+        "params": {
+            "region": "us-east-1",
+            "access_key_id": "ENVENDTEST0123456789",
+            "secret_access_key": "ENVENDTEST0123456789"
+        }
+    });
+    let resp = call("get_tables", params).await;
+
+    match previous {
+        Some(value) => std::env::set_var("AWS_ENDPOINT_URL", value),
+        None => std::env::remove_var("AWS_ENDPOINT_URL"),
+    }
+
+    assert_ok(&resp, "get_tables via AWS_ENDPOINT_URL");
+
+    let tables: Vec<String> = resp["result"]
+        .as_array()
+        .expect("get_tables result is an array")
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .collect();
+
+    assert!(
+        tables.iter().any(|t| t == "users"),
+        "users table present via AWS_ENDPOINT_URL: {tables:?}"
+    );
+}
+
 #[tokio::test]
 async fn get_columns_returns_user_attributes() {
     let Some(ep) = endpoint() else { return };
