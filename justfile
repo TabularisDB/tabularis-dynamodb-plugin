@@ -130,20 +130,31 @@ dev-install: build
 
 [macos]
 dev-install: build
-	mkdir -p "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb"
-	cp target/debug/dynamodb-plugin "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/"
-	cp .tabularium "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/"
-	@if [ -f ui/dist/index.js ]; then \
-		mkdir -p "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/ui/dist"; \
-		cp ui/dist/index.js "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb/ui/dist/"; \
-	fi
-	@echo "Installed to ~/Library/Application Support/com.debba.tabularis/plugins/dynamodb"
-	@echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+	# Tabularis >= 0.24.0 reads plugins from the unified `tabularis` project dir.
+	# Releases before that used the `com.debba.tabularis` identifier and migrate
+	# an existing tree into the new one on first start, so install into whichever
+	# path already exists and default to the current one on a clean machine.
+	dest="$HOME/Library/Application Support/tabularis/plugins/dynamodb"; \
+	legacy="$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb"; \
+	if [ ! -d "$dest" ] && [ -d "$legacy" ]; then dest="$legacy"; fi; \
+	mkdir -p "$dest"; \
+	cp target/debug/dynamodb-plugin "$dest/"; \
+	cp .tabularium "$dest/"; \
+	if [ -f ui/dist/index.js ]; then mkdir -p "$dest/ui/dist"; cp ui/dist/index.js "$dest/ui/dist/"; fi; \
+	echo "Installed to $dest"; \
+	echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [windows]
 dev-install: build
 	#!pwsh
-	$dest = Join-Path $env:APPDATA "debba\tabularis\data\plugins\dynamodb"
+
+	# Tabularis >= 0.24.0 reads plugins from the unified `tabularis` project dir.
+	# Releases before that used the `debba\tabularis\data` tree and migrate an
+	# existing install into the new one on first start, so target whichever path
+	# already exists and default to the current one on a clean machine.
+	$dest = Join-Path $env:APPDATA "tabularis\plugins\dynamodb"
+	$legacy = Join-Path $env:APPDATA "debba\tabularis\data\plugins\dynamodb"
+	if (-not (Test-Path $dest) -and (Test-Path $legacy)) { $dest = $legacy }
 	New-Item -ItemType Directory -Force -Path $dest | Out-Null
 	Copy-Item "target\debug\dynamodb-plugin.exe" $dest
 	Copy-Item ".tabularium" $dest
@@ -160,9 +171,18 @@ uninstall:
 
 [macos]
 uninstall:
+	# Both trees: an install can live in either, depending on the app version.
+	rm -rf "$HOME/Library/Application Support/tabularis/plugins/dynamodb"
 	rm -rf "$HOME/Library/Application Support/com.debba.tabularis/plugins/dynamodb"
 
 [windows]
 uninstall:
-	$dest = Join-Path $env:APPDATA "debba\tabularis\data\plugins\dynamodb"
-	if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+	#!pwsh
+
+	# Both trees: an install can live in either, depending on the app version.
+	# (This recipe ran line-by-line without a shebang before, so `$dest` was
+	# unset by the time `Test-Path` ran and nothing was removed.)
+	$current = Join-Path $env:APPDATA "tabularis\plugins\dynamodb"
+	$legacy = Join-Path $env:APPDATA "debba\tabularis\data\plugins\dynamodb"
+	if (Test-Path $current) { Remove-Item -Recurse -Force $current }
+	if (Test-Path $legacy) { Remove-Item -Recurse -Force $legacy }
