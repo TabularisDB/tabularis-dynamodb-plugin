@@ -148,11 +148,9 @@ fn normalized_params(params: &Value) -> Value {
     }
 
     // The AWS SDK requires a region for request signing even when talking to a
-    // local endpoint (e.g. DynamoDB Local). Default it whenever the connection
-    // has something to sign with — an endpoint (DynamoDB Local / custom
-    // endpoint) or an explicit access-key/secret pair — since the generic GUI
-    // form has no region field and a keys-only connection has no endpoint to
-    // parse a region out of (#71).
+    // local endpoint (e.g. DynamoDB Local), since the generic GUI form has no
+    // region field and a keys-only connection has no endpoint to parse a region
+    // out of (#71).
     //
     // Precedence: explicit top-level `region` > opaque `extra["region"]`
     // (connection-level extra fields, persisted and forwarded by the host
@@ -160,18 +158,23 @@ fn normalized_params(params: &Value) -> Value {
     // > region parsed from an AWS endpoint hostname
     // (`dynamodb.us-west-2.amazonaws.com` -> `us-west-2`) > plugin-level
     // default-region setting (Settings → Plugins → DynamoDB) > us-east-1.
-    // Profile connections are exempt: they take their region from the AWS
-    // profile's own config (`extra["profile"]` included, which is why the
-    // promotion above runs first).
+    //
+    // The first two are connection-level choices, so they apply to every
+    // connection that says nothing itself, profile or not — the signing region
+    // must match the endpoint the request is sent to, and a profile whose
+    // config disagrees with it otherwise fails with
+    // `InvalidSignatureException: Credential should be scoped to a valid
+    // region`. Profile connections take their region from the AWS profile's own
+    // config (`extra["profile"]` included, which is why the promotion above
+    // runs first), so the plugin-setting and us-east-1 fallbacks stay out of
+    // their way.
     let has_endpoint = has_non_blank(inner, "endpoint");
     let has_creds =
         has_non_blank(inner, "access_key_id") && has_non_blank(inner, "secret_access_key");
+    let has_profile = has_non_blank(inner, "profile");
 
-    if (has_endpoint || has_creds)
-        && !has_non_blank(inner, "region")
-        && !has_non_blank(inner, "profile")
-    {
-        let region = inner
+    if !has_non_blank(inner, "region") {
+        let connection_region = inner
             .get("extra")
             .and_then(|v| v.get("region"))
             .and_then(|v| v.as_str())
@@ -184,10 +187,21 @@ fn normalized_params(params: &Value) -> Value {
                     .and_then(|v| v.as_str())
                     .and_then(region_from_endpoint)
                     .map(str::to_string)
-            })
-            .or_else(crate::settings::default_region)
-            .unwrap_or_else(|| "us-east-1".to_string());
-        inner.insert("region".to_string(), Value::String(region));
+            });
+
+        // Fallback only, and only where the connection has something to sign
+        // with: a profile resolves its own region, and a connection with
+        // neither an endpoint nor explicit keys is rejected by `build_client`
+        // regardless of the region.
+        let fallback = if has_profile || !(has_endpoint || has_creds) {
+            None
+        } else {
+            crate::settings::default_region().or_else(|| Some("us-east-1".to_string()))
+        };
+
+        if let Some(region) = connection_region.or(fallback) {
+            inner.insert("region".to_string(), Value::String(region));
+        }
     }
 
     out
@@ -209,6 +223,99 @@ fn region_from_endpoint(endpoint: &str) -> Option<&str> {
     } else {
         Some(region)
     }
+}
+
+/// Operating system whose home-directory conventions apply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HomeOs {
+    Windows,
+    Unix,
+}
+
+impl HomeOs {
+    fn real() -> Self {
+        if std::env::consts::OS == "windows" {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+/// Resolve the home directory the AWS SDK itself would use, mirroring
+/// `aws_runtime::fs_util::home_dir`: `HOME` first on every platform, then the
+/// Windows variables (`USERPROFILE`, then `HOMEDRIVE` + `HOMEPATH`).
+///
+/// A GUI-launched plugin on Windows has no `HOME` — it is not a Windows
+/// variable, only shells like git-bash set it — so resolving the profile files
+/// from `HOME` alone rejects profiles the SDK resolves without complaint.
+fn home_dir_from(
+    os: HomeOs,
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    homedrive: Option<std::ffi::OsString>,
+    homepath: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    if let Some(home) = home {
+        return Some(std::path::PathBuf::from(home));
+    }
+    if os == HomeOs::Windows {
+        if let Some(userprofile) = userprofile {
+            return Some(std::path::PathBuf::from(userprofile));
+        }
+        if let (Some(mut drive), Some(path)) = (homedrive, homepath) {
+            drive.push(path);
+            return Some(std::path::PathBuf::from(drive));
+        }
+    }
+    None
+}
+
+/// [`home_dir_from`] fed from this process's environment.
+fn aws_home_dir() -> Option<std::path::PathBuf> {
+    home_dir_from(
+        HomeOs::real(),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOMEDRIVE"),
+        std::env::var_os("HOMEPATH"),
+    )
+}
+
+/// True when `name` exists as a section in the AWS shared credentials file
+/// (`[name]`) or the AWS config file (`[profile name]`, or plain `[name]`
+/// for `default`). Honours `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
+fn profile_exists(name: &str) -> bool {
+    let home = aws_home_dir();
+    let creds_path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".aws/credentials")));
+    let config_path = std::env::var_os("AWS_CONFIG_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".aws/config")));
+
+    if let Some(contents) = creds_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        if ini_has_section(&contents, &[name.to_string()]) {
+            return true;
+        }
+    }
+    if let Some(contents) = config_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        if ini_has_section(&contents, &[format!("profile {name}"), name.to_string()]) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when any of `names` appears as an INI section header.
+fn ini_has_section(contents: &str, names: &[String]) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line.starts_with('[')
+            && line.ends_with(']')
+            && names
+                .iter()
+                .any(|n| line[1..line.len() - 1].trim() == n.trim())
+    })
 }
 
 /// Build a DynamoDB client from a JSON-RPC params object, validating the
@@ -244,6 +351,18 @@ pub async fn build_client(params: &Value) -> Result<Client, PluginError> {
             "connection params required: provide at least an endpoint, or \
              region + access_key_id + secret_access_key, or a profile",
         ));
+    }
+
+    // Fail fast with an actionable message when the named profile does not
+    // exist; the SDK otherwise surfaces a generic credential/dispatch error
+    // that gives no hint the profile name itself is wrong.
+    if let Some(profile_name) = profile {
+        if !profile_exists(profile_name) {
+            return Err(PluginError::invalid_params(format!(
+                "AWS profile '{profile_name}' not found in ~/.aws/credentials or \
+                 ~/.aws/config"
+            )));
+        }
     }
 
     Client::new(
@@ -440,14 +559,151 @@ mod tests {
     #[test]
     fn extra_profile_suppresses_region_default() {
         // A profile connection takes its region from ~/.aws/config, so a
-        // profile chosen in the connection modal must keep the region
-        // fallbacks out of the way.
+        // profile chosen in the connection modal must keep the plugin-setting
+        // and us-east-1 fallbacks out of the way.
         let params = json!({"params": {
             "endpoint": "http://localhost:8000",
             "extra": {"profile": "staging"},
         }});
         let n = normalized_params(&params);
         assert!(n["params"].get("region").is_none());
+    }
+
+    #[test]
+    fn profile_with_aws_endpoint_still_gets_endpoint_region() {
+        // The signing region must match the endpoint the request is sent to.
+        // A profile only suppresses the *fallback* chain; a region parsed
+        // from an AWS endpoint hostname still applies, otherwise the request
+        // fails with "Credential should be scoped to a valid region".
+        let params = json!({"params": {
+            "endpoint": "https://dynamodb.us-west-2.amazonaws.com:443",
+            "extra": {"profile": "staging"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn profile_with_extra_region_keeps_explicit_region() {
+        let params = json!({"params": {
+            "endpoint": "http://localhost:8000",
+            "extra": {"profile": "staging", "region": "eu-central-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-central-1");
+    }
+
+    #[test]
+    fn profile_only_connection_keeps_connection_level_region() {
+        // The region selector is a connection-level choice, so an explicit
+        // `extra["region"]` must not be dropped just because the profile (and
+        // not an endpoint or a key pair) is what the connection signs with.
+        let params = json!({"params": {
+            "extra": {"profile": "staging", "region": "eu-west-1"},
+        }});
+        let n = normalized_params(&params);
+        assert_eq!(n["params"]["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn profile_only_connection_leaves_region_to_the_profile() {
+        // Nothing connection-level said a region, so the profile's own config
+        // decides — including when there is no endpoint to parse one from.
+        let params = json!({"params": {"extra": {"profile": "staging"}}});
+        let n = normalized_params(&params);
+        assert!(n["params"].get("region").is_none());
+    }
+
+    #[test]
+    fn ini_has_section_matches_exact_names() {
+        let contents =
+            "[default]\naws_access_key_id = x\n\n[profile staging]\nregion = us-east-1\n";
+        assert!(ini_has_section(contents, &["default".to_string()]));
+        assert!(ini_has_section(
+            contents,
+            &["profile staging".to_string(), "staging".to_string()]
+        ));
+        assert!(!ini_has_section(contents, &["prod".to_string()]));
+        // Substring of an existing section must not match.
+        assert!(!ini_has_section(contents, &["stagin".to_string()]));
+    }
+
+    #[test]
+    fn home_dir_matches_the_sdk_resolution() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        // HOME wins on every platform, even when the Windows variables are
+        // set too (they are only consulted when HOME is absent).
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Windows,
+                os("/home/x"),
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            Some(std::path::PathBuf::from("/home/x"))
+        );
+        // Windows without HOME: USERPROFILE, which is what a GUI-launched
+        // plugin process actually has.
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Windows,
+                None,
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            Some(std::path::PathBuf::from("C:\\Users\\x"))
+        );
+        // Windows without HOME or USERPROFILE: HOMEDRIVE + HOMEPATH.
+        assert_eq!(
+            home_dir_from(HomeOs::Windows, None, None, os("C:"), os("\\Users\\x")),
+            Some(std::path::PathBuf::from("C:\\Users\\x"))
+        );
+        // Unix never consults the Windows variables.
+        assert_eq!(
+            home_dir_from(
+                HomeOs::Unix,
+                None,
+                os("C:\\Users\\x"),
+                os("C:"),
+                os("\\Users\\x")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn profile_exists_reads_credentials_and_config() {
+        let _guard = crate::settings::TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("ddb-prof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds = dir.join("credentials");
+        let config = dir.join("config");
+        std::fs::write(&creds, "[default]\naws_access_key_id = x\n").unwrap();
+        std::fs::write(&config, "[profile staging]\nregion = us-east-1\n").unwrap();
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds);
+        std::env::set_var("AWS_CONFIG_FILE", &config);
+
+        assert!(profile_exists("default"));
+        assert!(profile_exists("staging"));
+        assert!(!profile_exists("nonexistent-profile"));
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        std::env::remove_var("AWS_CONFIG_FILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn unknown_profile_rejected_with_clear_message() {
+        let params = json!({"params": {"extra": {"profile": "definitely-not-a-real-profile-xyz"}}});
+        let err = build_client(&params).await.unwrap_err();
+        assert!(
+            err.message.contains("not found in ~/.aws/credentials"),
+            "expected profile-not-found error, got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -642,15 +898,17 @@ mod tests {
     }
 
     #[test]
-    fn extra_region_ignored_for_profile_connections() {
-        // Profile connections inherit their region from ~/.aws/config.
+    fn extra_region_applies_for_profile_connections() {
+        // An explicit region picked in the connection modal is a
+        // connection-level choice and wins over the profile's own config;
+        // only the plugin-setting / us-east-1 fallbacks stay suppressed.
         let params = json!({"params": {
             "endpoint": "http://localhost:8000",
             "profile": "default",
             "extra": {"region": "ap-southeast-2"},
         }});
         let n = normalized_params(&params);
-        assert!(n["params"].get("region").is_none());
+        assert_eq!(n["params"]["region"], "ap-southeast-2");
     }
 
     #[tokio::test]
