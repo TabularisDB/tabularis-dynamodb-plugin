@@ -1843,10 +1843,8 @@ mod tests {
 
     #[test]
     fn parse_body_rejects_wire_query_fields() {
-        let err = parse_native_body(
-            "TableName: users\nKeyConditionExpression: id = :id",
-        )
-        .unwrap_err();
+        let err =
+            parse_native_body("TableName: users\nKeyConditionExpression: id = :id").unwrap_err();
         assert!(err.contains("KeyConditionExpression"), "{err}");
     }
 
@@ -1858,11 +1856,13 @@ mod tests {
 
     #[test]
     fn parse_body_unknown_fields_are_sorted() {
-        let err =
-            parse_native_body("TableName: users\nZzz: 1\nAaa: 2").unwrap_err();
+        let err = parse_native_body("TableName: users\nZzz: 1\nAaa: 2").unwrap_err();
         let a = err.find("Aaa").unwrap();
         let z = err.find("Zzz").unwrap();
-        assert!(a < z, "unknown keys should be listed deterministically: {err}");
+        assert!(
+            a < z,
+            "unknown keys should be listed deterministically: {err}"
+        );
     }
 
     #[test]
