@@ -1012,6 +1012,7 @@ async fn execute_ordered_select(
 }
 
 /// Parsed request body for the native scan/query/get modes.
+#[derive(Debug)]
 struct NativeRequest {
     table_name: String,
     limit: Option<i32>,
@@ -1032,6 +1033,46 @@ fn parse_native_body(body: &str) -> Result<NativeRequest, String> {
     let obj = value
         .as_object()
         .ok_or_else(|| "request body must be a YAML mapping".to_string())?;
+
+    // Reject unknown keys: a mistyped field or a DynamoDB wire-API name
+    // (FilterExpression, KeyConditionExpression, ...) must never be silently
+    // discarded, because that changes which rows come back with no warning.
+    const KNOWN_KEYS: &[&str] = &[
+        "TableName",
+        "table_name",
+        "Limit",
+        "limit",
+        "PartitionKey",
+        "partition_key",
+        "pk",
+        "PartitionValue",
+        "partition_value",
+        "pk_value",
+        "SortKeyName",
+        "sort_key_name",
+        "sk",
+        "SortKeyValue",
+        "sort_key_value",
+        "sk_value",
+        "Key",
+        "key",
+    ];
+    let mut unknown: Vec<&str> = obj
+        .keys()
+        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(format!(
+            "unknown field(s) in request body: {}. Supported fields: \
+             TableName, Limit, PartitionKey, PartitionValue, SortKeyName, \
+             SortKeyValue, Key (snake_case forms and the pk/pk_value/sk/sk_value \
+             aliases are also accepted). Scan/query filtering expressions are \
+             not supported here \u{2014} use PartiQL mode for filtered reads.",
+            unknown.join(", ")
+        ));
+    }
 
     let get_str = |key: &str| obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string());
 
@@ -1783,6 +1824,66 @@ mod tests {
     #[test]
     fn parse_body_requires_table_name() {
         assert!(parse_native_body("Limit: 5").is_err());
+    }
+
+    #[test]
+    fn parse_body_rejects_unknown_field() {
+        // The README's old scan example: the filter must never be silently
+        // dropped — an unfiltered scan looks successful and returns the
+        // whole table (issue #89).
+        let err = parse_native_body(
+            "TableName: users\nFilterExpression: age > :val\nExpressionAttributeValues: {\":val\": {\"N\": \"25\"}}",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown field(s)"), "{err}");
+        assert!(err.contains("FilterExpression"), "{err}");
+        assert!(err.contains("ExpressionAttributeValues"), "{err}");
+        assert!(err.contains("TableName"), "{err}");
+    }
+
+    #[test]
+    fn parse_body_rejects_wire_query_fields() {
+        let err =
+            parse_native_body("TableName: users\nKeyConditionExpression: id = :id").unwrap_err();
+        assert!(err.contains("KeyConditionExpression"), "{err}");
+    }
+
+    #[test]
+    fn parse_body_rejects_typos() {
+        let err = parse_native_body("TableName: users\nPartitonKey: id").unwrap_err();
+        assert!(err.contains("PartitonKey"), "{err}");
+    }
+
+    #[test]
+    fn parse_body_unknown_fields_are_sorted() {
+        let err = parse_native_body("TableName: users\nZzz: 1\nAaa: 2").unwrap_err();
+        let a = err.find("Aaa").unwrap();
+        let z = err.find("Zzz").unwrap();
+        assert!(
+            a < z,
+            "unknown keys should be listed deterministically: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_body_accepts_all_known_aliases() {
+        let req = parse_native_body(
+            "table_name: users\nlimit: 10\npk: id\npk_value: abc\nsk: created\nsk_value: 2026-01-01",
+        )
+        .unwrap();
+        assert_eq!(req.table_name, "users");
+        assert_eq!(req.limit, Some(10));
+        assert_eq!(req.partition_key.as_deref(), Some("id"));
+        assert_eq!(req.partition_value, Some(json!("abc")));
+        assert_eq!(req.sort_key_name.as_deref(), Some("created"));
+        assert_eq!(req.sort_key_value, Some(json!("2026-01-01")));
+
+        let req = parse_native_body(
+            "table_name: users\npartition_key: id\npartition_value: abc\nsort_key_name: created\nsort_key_value: 2026-01-01\nkey:\n  id: abc",
+        )
+        .unwrap();
+        assert_eq!(req.partition_key.as_deref(), Some("id"));
+        assert!(req.key.unwrap().contains_key("id"));
     }
 
     #[test]
