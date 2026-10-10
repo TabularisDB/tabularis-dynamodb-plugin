@@ -181,17 +181,33 @@ SELECT * FROM users WHERE id = 'user123'
 ```sql
 #!scan
 TableName: users
-FilterExpression: age > :val
-ExpressionAttributeValues: {":val": {"N": "25"}}
+Limit: 100
 ```
+
+Scan mode reads the whole table (optionally capped by `Limit`). It has no
+filter fields — for a filtered read, use PartiQL mode
+(`SELECT * FROM users WHERE age > 25`). Unknown body fields are rejected
+with an `InvalidParams` error, so a misspelled or unsupported field can
+never be silently dropped.
 
 ### Query Mode (requires key condition)
 
 ```sql
 #!query
 TableName: users
-KeyConditionExpression: id = :id
-ExpressionAttributeValues: {":id": {"S": "user123"}}
+PartitionKey: id
+PartitionValue: user123
+```
+
+For a table with a composite key, add the sort key:
+
+```sql
+#!query
+TableName: orders
+PartitionKey: user_id
+PartitionValue: user123
+SortKeyName: order_date
+SortKeyValue: 2024-01-01
 ```
 
 ### Get Mode
@@ -199,8 +215,19 @@ ExpressionAttributeValues: {":id": {"S": "user123"}}
 ```sql
 #!get
 TableName: users
-Key: {"id": {"S": "user123"}}
+Key:
+  id: user123
 ```
+
+`Key` is a plain YAML mapping of column to value (not the DynamoDB wire
+shape — no `{"S": ...}` wrappers). Include every primary key component.
+
+All native modes accept the snake_case field names as well (`table_name`,
+`partition_key`, `partition_value`, `sort_key_name`, `sort_key_value`),
+plus the short aliases `pk`, `pk_value`, `sk`, and `sk_value`. The full
+field set is: `TableName`, `Limit`, `PartitionKey`, `PartitionValue`,
+`SortKeyName`, `SortKeyValue`, and `Key`; anything else in the body is an
+error.
 
 ## Supported Operations
 
