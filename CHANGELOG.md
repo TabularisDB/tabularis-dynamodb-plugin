@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.1.8] — 2026-10-10
+
+### Fixed
+
+- **Profile connections honour the connection's own region, and an unknown
+  profile name fails fast (#82).** Two defects in the profile path added with
+  v0.1.7's extra fields. First, the profile exemption in `normalized_params`
+  skipped the *entire* region chain, including the region parsed from an AWS
+  endpoint hostname, so a connection pointing at e.g.
+  `dynamodb.us-west-2.amazonaws.com` whose profile config named another region
+  was signed with the wrong one and failed with
+  `InvalidSignatureException: Credential should be scoped to a valid region`.
+  Connection-level choices — explicit `extra["region"]` and the
+  endpoint-hostname region — now apply with or without a profile; only the
+  plugin-setting and `us-east-1` fallbacks stay out of a profile connection's
+  way, so the profile config still decides when the connection says nothing.
+  Second, a typo'd profile surfaced as an opaque `DynamoDB ping failed:
+  dispatch failure`; the name is now checked against the shared credentials and
+  config files and rejected with `AWS profile '<name>' not found in
+  ~/.aws/credentials or ~/.aws/config`. Both files are resolved the way the SDK
+  resolves them (`AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`, `[name]` in
+  credentials vs `[profile name]` in config, and `HOME` → Windows
+  `USERPROFILE` / `HOMEDRIVE` + `HOMEPATH` — a GUI-launched plugin has no
+  `HOME`).
+- **The endpoint URL the AWS SDK resolves now reaches the DynamoDB service
+  config (#77).** `pool::get_config` built the service config with
+  `Config::builder()` and copied across only the region and the credentials
+  provider, dropping the endpoint URL that `aws_config::defaults().load()`
+  resolves from `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_DYNAMODB`. A connection
+  relying on the default chain (HOST/PORT empty) could therefore not be pointed
+  at DynamoDB Local — the request silently went to real AWS. The service config
+  is now derived from the loaded `SdkConfig` (endpoint, retry policy, timeouts,
+  HTTP client, identity cache); an explicit `endpoint` param is applied last, so
+  HOST/PORT still wins over the environment.
+- **Native-mode request bodies fail closed on unknown fields (#89).** `#!scan`,
+  `#!query` and `#!get` parse a YAML mapping, and `parse_native_body` picked the
+  known keys out of it while silently ignoring everything else, so a body
+  written against the wire API could return every row (`FilterExpression`
+  dropped), fail confusingly (`KeyConditionExpression`), or match nothing (`Key`
+  as a wire-API mapping). Unknown fields are now rejected with `-32602`,
+  naming the offending field(s) (deterministically sorted) and the supported
+  set. `FilterExpression` / `KeyConditionExpression` support is deliberately
+  not implemented — that is an expression-parsing feature, not a validation
+  fix.
+
+### Changed
+
+- **The README and `.tabularium` now state the region chain the plugin actually
+  has (#81).** An ambient `AWS_REGION` / `AWS_DEFAULT_REGION` does not
+  participate in the chain for connections the plugin signs itself. Profile
+  connections are the exception: they inherit the ambient region, because the
+  SDK's own chain puts the environment ahead of the profile's `region` — the
+  same precedence the AWS CLI has. Both statements are backed by SigV4
+  capture-proxy measurements (the signed request is the only place the region is
+  observable) and are written down instead of being implied.
+- **`dev-install` / `uninstall` target the plugin dirs current Tabularis reads
+  (#78).** The `[windows]` and `[macos]` recipes copied into the pre-#258
+  project dirs, while Tabularis ≥ 0.24.0 reads the unified `tabularis` data dir
+  and migrates the old tree away on first start — the build landed where the app
+  never looks, with no error and no warning. They now install into
+  `%APPDATA%\tabularis\plugins\<driver>` /
+  `~/Library/Application Support/tabularis/plugins/<driver>` /
+  `~/.local/share/tabularis/plugins/<driver>`, falling back to the legacy trees
+  only when those are the ones that exist. The Windows `uninstall` recipe also
+  gained the `#!pwsh` shebang it was missing: without it the body ran one line
+  per shell, `$dest` was unset by the time `Test-Path` ran, and the recipe
+  errored while deleting nothing.
+- The README documents the development loop and the registry release flow
+  (#83): how to build, install, seed fixtures and smoke-test the plugin, and how
+  a tag becomes a registry entry.
+- Dependency updates: the aws-sdk group (#94), `aws-sdk-dynamodb` 1.126.0 →
+  1.127.0 (#95), `tokio` 1.53.1 → 1.53.2 (#96).
+
+### Tests
+
+- **New `tests/plugin_harness.py` (#79).** The seven Python suites hard-coded
+  `../target/release/dynamodb-plugin.exe`, so no debug build, branch build or
+  non-Windows host could run them, and they assumed a composite-key `test_users`
+  fixture that nothing created — a fresh DynamoDB Local produced a wall of
+  `ResourceNotFoundException`, and `test_issue_8.py` dropped the shared fixture
+  on its way through, failing every suite after it in the same batch. The
+  harness resolves the binary from `PLUGIN_BINARY`, exposes the shared
+  connection params and the `test_users` definition, and creates and seeds
+  `test_users` / `edge_cases` idempotently; `just seed-fixtures` runs it on
+  demand.
+- **The stale expectations are gone (#80, #90, #91).** `test_deep.py` sent
+  PartiQL statements to the native modes, which parse YAML, and asserted the
+  wrong shapes throughout; `test_issue_8.py` asserted a `DROP TABLE` guard that
+  was deliberately removed in 2026-07. Both now pin the behaviour that exists —
+  real mappings with row-count assertions, and the standard
+  `ExecuteQueryResponse` envelope from a DROP against the suite's own throwaway
+  table. The two `note_bug` texts narrating behaviour that no longer exists were
+  replaced by assertions on the current contract, so a regression fails the
+  suite instead of being reported as a bug. All seven suites exit 0 on a fresh
+  DynamoDB Local (a second run is identical and leaves no throwaway tables
+  behind).
+
 ## [0.1.7] — 2026-09-21
 
 ### Added
