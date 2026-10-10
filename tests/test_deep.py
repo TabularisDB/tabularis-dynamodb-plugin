@@ -400,18 +400,11 @@ def main():
         "key": {"id": "usr-001", "created_at": "2026-01-15T10:30:00Z", "name": "Alice"},
         "col_name": "role", "new_val": "hacker",
     }, req_id=47)
-    # DynamoDB will reject this because "name" is not a key attribute
-    if "error" in r:
-        passed.append(("update with non-key columns in key", r["error"]))
-        print(f"  ✅ update with non-key cols in key → error: {r['error'].get('message', '')[:60]}")
-        note_bug(
-            "no validation of key columns",
-            "update_record/delete_record accept any columns in the 'key' object without "
-            "validating they're actual key attributes. Non-key columns in WHERE cause "
-            "DynamoDB service errors with unhelpful messages."
-        )
-    else:
-        note_bug("update with non-key cols succeeded unexpectedly", str(r.get("result", ""))[:100])
+    # The plugin validates key columns itself (#23) and rejects "name" with a
+    # clear message before anything reaches DynamoDB — assert that contract
+    # instead of narrating the removed behaviour as a bug (#90).
+    check("update with non-key columns in key rejected", r, expect_ok=False,
+          expect_error_contains="not a key attribute")
 
     # 4i. Invalid PartiQL syntax
     r = send(proc, "execute_query", {
@@ -590,17 +583,36 @@ def main():
     check("get_columns", r)
     if "result" in r:
         cols = r["result"]
+        # metadata.rs pins BOTH key roles non-nullable (is_nullable:
+        # !(is_pk || is_sort_key)), but the response carries no sort-key
+        # marker — reading is_pk alone used to flag the sort key as a defect
+        # (#91). Derive the key set from the fixture's schema instead.
+        key_cols = {name for name, _ in plugin_harness.TABLE_KEY_SCHEMA}
+        by_name = {c["name"]: c for c in cols}
         # In DynamoDB, non-key attributes are ALWAYS nullable
-        non_nullable_non_pk = [c["name"] for c in cols if not c.get("is_pk") and not c.get("is_nullable")]
-        if non_nullable_non_pk:
+        non_nullable_non_key = [c["name"] for c in cols
+                                if c["name"] not in key_cols and not c.get("is_nullable")]
+        nullable_keys = sorted(k for k in key_cols
+                               if k in by_name and by_name[k].get("is_nullable"))
+        missing_keys = sorted(k for k in key_cols if k not in by_name)
+        if missing_keys:
+            failed.append(("get_columns missing key attributes", missing_keys))
+            print(f"  ❌ get_columns missing key attributes: {missing_keys}")
+        elif non_nullable_non_key:
             note_bug(
                 "is_nullable always false",
-                f"Non-key columns marked is_nullable=false: {non_nullable_non_pk}. "
+                f"Non-key columns marked is_nullable=false: {non_nullable_non_key}. "
                 "In DynamoDB, all non-key attributes are optional/nullable. "
                 "Only key attributes should have is_nullable=false."
             )
+        elif nullable_keys:
+            note_bug(
+                "key column reported nullable",
+                f"Key attributes marked is_nullable=true: {nullable_keys}. "
+                "Key columns must be non-nullable."
+            )
         else:
-            print("  ✅ is_nullable correctness looks OK")
+            print("  ✅ is_nullable: keys non-nullable, non-key columns nullable")
 
     # 8b. get_databases — hardcoded response
     r = send(proc, "get_databases", {"params": CONN}, req_id=91)
