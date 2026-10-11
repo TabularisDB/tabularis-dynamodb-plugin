@@ -1,13 +1,13 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/debba/tabularis/main/public/logo-sm.png" width="120" height="120" />
+  <img src="https://raw.githubusercontent.com/debba/tabularis/main/public/logo-sm.png" alt="Tabularis logo" width="120" height="120" />
 </div>
 
 # tabularis-dynamodb-plugin
 
 <p align="center">
 
-![](https://img.shields.io/github/release/tabularisDB/tabularis-dynamodb-plugin.svg?style=flat)
-![](https://img.shields.io/github/downloads/tabularisDB/tabularis-dynamodb-plugin/total.svg?style=flat)
+![Latest release](https://img.shields.io/github/release/tabularisDB/tabularis-dynamodb-plugin.svg?style=flat)
+![Downloads](https://img.shields.io/github/downloads/tabularisDB/tabularis-dynamodb-plugin/total.svg?style=flat)
 ![Build & Release](https://github.com/tabularisDB/tabularis-dynamodb-plugin/workflows/Release/badge.svg)
 [![Discord](https://img.shields.io/discord/1502944695808950282?color=5865F2&logo=discord&logoColor=white)](https://discord.com/invite/K2hmhfHRSt)
 
@@ -32,6 +32,7 @@ This plugin enables Tabularis to connect to AWS DynamoDB and DynamoDB Local inst
 - [Supported Operations](#supported-operations)
 - [Building from Source](#building-from-source)
 - [Development](#development)
+- [Contributing: PR Titles & Versioning](#contributing-pr-titles--versioning)
 - [Releasing](#releasing)
 - [Changelog](#changelog)
 - [License](#license)
@@ -138,11 +139,11 @@ If your version of Tabularis supports plugin management, the DynamoDB plugin can
 2. Extract the archive.
 3. Copy `dynamodb-plugin` (or `dynamodb-plugin.exe` on Windows) and `.tabularium` into the Tabularis plugins directory:
 
-| OS | Plugins Directory |
-|---|---|
-| **Linux** | `~/.local/share/tabularis/plugins/dynamodb/` |
-| **macOS** | `~/Library/Application Support/tabularis/plugins/dynamodb/` |
-| **Windows** | `%APPDATA%\tabularis\plugins\dynamodb\` |
+   | OS | Plugins Directory |
+   |---|---|
+   | **Linux** | `~/.local/share/tabularis/plugins/dynamodb/` |
+   | **macOS** | `~/Library/Application Support/tabularis/plugins/dynamodb/` |
+   | **Windows** | `%APPDATA%\tabularis\plugins\dynamodb\` |
 
 4. Restart Tabularis.
 
@@ -353,8 +354,11 @@ just seed-dynamodb
 # Unit tests
 cargo test
 
-# Integration tests (requires DynamoDB Local)
+# Mock-only RPC integration tests
 cargo test --test integration_test
+
+# Live tests against DynamoDB Local (`just run-dynamodb` + `just seed-dynamodb` first)
+just test-integration
 ```
 
 #### Python suites (`tests/*.py`)
@@ -393,15 +397,37 @@ echo '{"jsonrpc":"2.0","method":"test_connection","params":{"params":{"region":"
 - **Async runtime:** tokio
 - **Protocol:** JSON-RPC 2.0 over stdio
 
+## Contributing: PR Titles & Versioning
+
+PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`type: subject`, `type(scope): subject`, or `type!: subject` for a breaking
+change), enforced by CI on every PR. Add a `BREAKING CHANGE:` footer to the
+PR description for breaking changes that don't fit cleanly into the title.
+
+Every PR also needs exactly one `prerelease:alpha` / `prerelease:beta` /
+`prerelease:rc` / `prerelease:stable` label, so CI knows which release channel
+to target when suggesting the next version. This plugin ships on the stable
+`0.x` line, so `prerelease:stable` is the usual choice. There's no default: the
+version-suggestion check fails with a clear error if the label is missing.
+Dependabot PRs are exempt.
+
+The suggestion is posted as a PR comment (`feat` → minor, `fix` / `refactor` /
+`perf` → patch, breaking → major, everything else → no release). It is
+informational only: no tag or release is created automatically.
+
+CI also runs `markdownlint` on every Markdown file, validates `.tabularium`
+against the live registry schema, runs `cargo audit` (on every push and weekly),
+and runs the DynamoDB Local integration suite.
+
 ## Releasing
 
 Releases are cut from a version tag: CI builds the archives, and the hosted registry ingests the result on its own. Nothing else needs to be updated.
 
 1. Bump `version` in **both** `Cargo.toml` and `.tabularium` to the same value — the tag and the manifest `version` must agree, and the registry rejects an ingest whose tag (minus the `v`) disagrees with the manifest.
-2. Move the unreleased entries in `CHANGELOG.md` into a new `## [X.Y.Z] — YYYY-MM-DD` section at the top.
+2. Move the unreleased entries in `CHANGELOG.md` into a new `## [X.Y.Z] — YYYY-MM-DD` section at the top. The release workflow uses that section as the GitHub Release notes and fails if it is missing or empty.
 3. Commit (`chore(release): bump version to vX.Y.Z`) and push to `main`.
 4. Tag that commit and push the tag: `git tag vX.Y.Z && git push origin main --tags`.
-5. `.github/workflows/release.yml` runs on the tag. It builds five targets — `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win-x64` — stages each binary with `.tabularium` (plus `ui/dist/index.js` when the UI extension is present), publishes a GitHub Release with the five `dynamodb-plugin-<platform>.zip` archives, and attaches `.tabularium` as a standalone asset under the name `default.tabularium`. That standalone copy is the manifest the registry reads.
+5. `.github/workflows/release.yml` runs on the tag. It first checks that the tag matches the version in `.tabularium` and `Cargo.toml` and validates the manifest, then builds five targets — `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win-x64` — stages each binary with `.tabularium` (plus `ui/dist/index.js` when the UI extension is present), smoke-tests each native binary with an `initialize` request, publishes a GitHub Release with the five `dynamodb-plugin-<platform>.zip` archives, and attaches `.tabularium` as a standalone asset under the name `default.tabularium`. That standalone copy is the manifest the registry reads.
 
 Practically, the `.tabularium` version bump is what marks a release — the tag only triggers the build.
 
@@ -423,7 +449,7 @@ The registry renders this README on the plugin page, so README edits reach users
 
 ## Maintainers
 
-* @fuleinist
+- @fuleinist
 
 ## License
 

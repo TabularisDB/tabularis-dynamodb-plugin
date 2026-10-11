@@ -12,7 +12,7 @@ cargo fmt --all          # Format
 
 ## Project Structure
 
-```
+```text
 src/
 ├── main.rs               # Stdio transport, worker pool
 ├── lib.rs                # Public module exports

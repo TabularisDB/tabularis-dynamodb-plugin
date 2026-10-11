@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Default types are opened/synchronize/reopened, which miss title-only
+    # edits — needed so pr-title re-checks a title edit. The version
+    # suggestion lives in its own workflow (version-suggestion.yml).
+    types: [opened, edited, reopened, synchronize]
+  schedule:
+    # Weekly cargo-audit sweep to catch newly-disclosed CVEs in deps that
+    # haven't otherwise changed. Off-peak minute, not :00/:30.
+    - cron: "41 6 * * 3"
 
 jobs:
   test:
@@ -54,3 +62,87 @@ jobs:
       - name: Build and test the bundle
         working-directory: ui
         run: npm test
+
+  validate-manifest:
+    name: Validate .tabularium manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate against the live registry schema
+        run: npx --yes @tabularium/cli validate .tabularium --registry https://registry.tabularis.dev --kind driver
+
+  pr-title:
+    name: PR title (Conventional Commits)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run markdownlint
+        run: npx --yes markdownlint-cli "**/*.md"
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      # Scheduled audit-check runs file or update tracking issues for
+      # informational warnings (e.g. "unmaintained").
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  live-db-integration:
+    name: DynamoDB Local integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Started with `docker run` rather than as a job service: services cannot
+      # override the container command, and without -sharedDb DynamoDB Local
+      # keeps a separate database per access key + region, so the seeded tables
+      # would be invisible to tests that sign with other credentials.
+      - name: Start DynamoDB Local
+        run: |
+          docker run -d --name dynamodb-local -p 8000:8000 \
+            amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -sharedDb
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null http://localhost:8000 && exit 0
+            sleep 1
+          done
+          echo "::error::DynamoDB Local did not become ready"
+          exit 1
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Seed test data
+        env:
+          AWS_ACCESS_KEY_ID: local
+          AWS_SECRET_ACCESS_KEY: local
+          AWS_DEFAULT_REGION: us-east-1
+        run: just seed-dynamodb
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run DynamoDB Local integration tests
+        env:
+          DYNAMODB_ENDPOINT: http://localhost:8000
+        run: cargo test --test dynamodb_local_test -- --test-threads=1
