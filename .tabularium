@@ -1,5 +1,6 @@
 {
-  "name": "dynamodb",
+  "id": "dynamodb",
+  "name": "DynamoDB",
   "version": "0.1.8",
   "kind": "driver",
   "icon": "https://raw.githubusercontent.com/TabularisDB/tabularis-dynamodb-plugin/main/dynamodb-icon.svg",
