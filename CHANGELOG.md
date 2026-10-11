@@ -9,6 +9,32 @@
   previous SVG.
 - **Manifest declares a stable `id` (`dynamodb`) and the display name
   "DynamoDB" (#97)** for the registry and the Tabularis catalogue.
+- **Shorter `region` setting description.** The registry caps setting
+  descriptions at 280 characters, so `.tabularium` failed schema validation.
+
+### Security
+
+- **Dropped the AWS SDK's legacy `rustls` feature.** `aws-sdk-dynamodb`'s
+  default features pulled in hyper 0.14, h2 0.3 and rustls 0.21 next to the
+  current HTTPS client, carrying RUSTSEC-2026-0258 (h2) and
+  RUSTSEC-2026-0098 / 0099 / 0104 (rustls-webpki 0.101). The crate now enables
+  `default-https-client` + `rt-tokio` only; `Cargo.lock` is refreshed and
+  `cargo audit` is clean.
+
+### Tooling
+
+- **CI** gains manifest validation against the live registry schema,
+  Conventional Commits PR titles, `markdownlint`, a `cargo audit` job (also run
+  weekly) and a DynamoDB Local job that seeds the fixtures and runs
+  `tests/dynamodb_local_test.rs`.
+- **Version suggestion** workflow comments the next version on each PR from its
+  title and `prerelease:*` label (see README, "Contributing: PR Titles &
+  Versioning").
+- **Release** workflow checks the tag against `.tabularium` and `Cargo.toml`,
+  validates the manifest, smoke-tests each native binary, flags `-` tags as
+  prereleases and uses this file's section as the release notes.
+- Bug report issue template and `.markdownlint.json`; existing Markdown fixed to
+  pass the linter.
 
 ## [0.1.8] — 2026-10-10
 
@@ -293,7 +319,7 @@
   fixing the macOS plugin directory path, and `build`/`release` now chain a
   `build-ui` passthrough.
 
-### Added
+### Added (repository housekeeping)
 
 - `LICENSE` file (Apache-2.0, matching the license already declared in
   `Cargo.toml`).

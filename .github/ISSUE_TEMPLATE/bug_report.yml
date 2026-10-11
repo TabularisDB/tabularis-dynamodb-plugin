@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a problem with the DynamoDB plugin.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: Tabularis app version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. macOS 15.1, Windows 11, Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro_steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: false
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message, if any
+      render: text
+    validations:
+      required: false

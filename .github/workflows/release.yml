@@ -6,8 +6,33 @@ on:
       - "v*"
 
 jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check tag matches manifest and crate version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TABULARIUM_VERSION=$(jq -r .version .tabularium)
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+
+          if [ "$TAG_VERSION" != "$TABULARIUM_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match .tabularium version ($TABULARIUM_VERSION)"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+      - name: Validate manifest against the live registry schema
+        run: npx --yes @tabularium/cli validate .tabularium --registry https://registry.tabularis.dev --kind driver
+
   build:
     name: ${{ matrix.platform-label }}
+    needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -117,6 +142,31 @@ jobs:
           }
           Compress-Archive -Path "$stage\*" -DestinationPath "dynamodb-plugin-${{ matrix.platform-label }}.zip"
 
+      # linux-arm64 is cross-compiled via `cross` on an x86_64 runner — that
+      # binary is a foreign architecture and cannot execute here without
+      # QEMU emulation, so this leg is skipped.
+      - name: Smoke test binary (unix)
+        if: runner.os != 'Windows' && !matrix.cross
+        run: |
+          response=$(echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | ./staging/dynamodb-plugin${{ matrix.binary-suffix }})
+          echo "$response"
+          echo "$response" | jq -e 'has("error") | not' > /dev/null || {
+            echo "::error::Binary did not return a valid initialize response"
+            exit 1
+          }
+
+      - name: Smoke test binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $response = '{"jsonrpc":"2.0","method":"initialize","id":1}' | & ".\staging\dynamodb-plugin${{ matrix.binary-suffix }}"
+          Write-Output $response
+          $parsed = $response | ConvertFrom-Json
+          if ($null -ne $parsed.error) {
+            Write-Error "Binary did not return a valid initialize response"
+            exit 1
+          }
+
       - name: Stash artifact
         uses: actions/upload-artifact@v7
         with:
@@ -140,6 +190,49 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Detect prerelease from tag
+        id: meta
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # A "-" suffix (semver pre-release, e.g. v0.2.0-beta.1) flags the
+          # GitHub release as a prerelease.
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          # The release body is this version's CHANGELOG.md section: from its
+          # "## [x.y.z]" heading to the next one (or EOF for the oldest entry).
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              line = $0
+              sub(/^## \[/, "", line)
+              sub(/\].*/, "", line)
+              if (capturing) { exit }
+              if (line == ver) { capturing = 1; found = 1; next }
+              next
+            }
+            capturing { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > /tmp/release-notes.raw.md || {
+            echo "::error::No CHANGELOG.md section found for version $VERSION (expected a '## [$VERSION]' heading). Add one before tagging."
+            exit 1
+          }
+
+          # Trim leading/trailing blank lines left by the section boundary.
+          awk 'NF{p=1} p' /tmp/release-notes.raw.md | tac | awk 'NF{p=1} p' | tac > /tmp/release-notes.md
+
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::CHANGELOG.md section for version $VERSION is empty."
+            exit 1
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
@@ -148,3 +241,6 @@ jobs:
           files: |
             artifacts/*.zip
             .tabularium
+          body_path: /tmp/release-notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
