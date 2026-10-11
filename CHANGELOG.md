@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.9] — 2026-10-11
+
+### Changed
+
+- **New plugin icon.** The `icon` in `.tabularium` now points to
+  `dynamodb-icon.png` (the DynamoDB logo from Wikimedia Commons), replacing the
+  previous SVG.
+- **Manifest declares a stable `id` (`dynamodb`) and the display name
+  "DynamoDB" (#97)** for the registry and the Tabularis catalogue.
+
 ## [0.1.8] — 2026-10-10
 
 ### Fixed
