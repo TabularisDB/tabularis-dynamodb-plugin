@@ -1027,7 +1027,7 @@ struct NativeRequest {
 
 /// Parse the YAML-ish body of a `#!scan`/`#!query`/`#!get` request.
 fn parse_native_body(body: &str) -> Result<NativeRequest, String> {
-    let value: Value = serde_yaml::from_str(body)
+    let value: Value = serde_norway::from_str(body)
         .map_err(|e| format!("could not parse request body as YAML: {e}"))?;
 
     let obj = value
