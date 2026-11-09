@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.10] — 2026-11-09
+
+### Security
+
+- Ship rustls-webpki 0.103.16 to reject distrusted emSign intermediates
+  (RUSTSEC-2026-0382, #102).
+- Include the serde_norway migration and Rustls 0.23.46 security update
+  already integrated on main, plus subsequent AWS SDK and Tokio updates.
+
 ## [0.1.9] — 2026-10-11
 
 ### Changed
