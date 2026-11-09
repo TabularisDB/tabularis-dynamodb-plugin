@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.10] — 2026-11-09
+## [0.1.11] — 2026-11-09
 
 ### Security
 
@@ -8,6 +8,11 @@
   (RUSTSEC-2026-0382, #102).
 - Include the serde_norway migration and Rustls 0.23.46 security update
   already integrated on main, plus subsequent AWS SDK and Tokio updates.
+
+### Build
+
+- Use the supported macos-latest runner for Apple Silicon release builds.
+  The v0.1.10 packaging attempt could not run on the retired macos-14 runner.
 
 ## [0.1.9] — 2026-10-11
 
